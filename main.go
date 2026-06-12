@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -123,6 +124,26 @@ type Report struct {
 	Events      []Event             `json:"events"`
 }
 
+type DailyReport struct {
+	Date           string       `json:"date"`
+	StartEquity    float64      `json:"start_equity"`
+	EndEquity      float64      `json:"end_equity"`
+	PerformancePct float64      `json:"performance_pct"`
+	RealizedPnL    float64      `json:"realized_pnl"`
+	MaxDrawdownPct float64      `json:"max_drawdown_pct"`
+	TradeCount     int          `json:"trade_count"`
+	WorstTrades    []WorstTrade `json:"worst_trades"`
+}
+
+type WorstTrade struct {
+	Time   string  `json:"time"`
+	Symbol string  `json:"symbol"`
+	Price  float64 `json:"price"`
+	Qty    float64 `json:"qty"`
+	PnL    float64 `json:"pnl"`
+	Reason string  `json:"reason"`
+}
+
 func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	once := flag.Bool("once", false, "run a single cycle")
@@ -171,6 +192,7 @@ func runCycle(configPath string) (Report, error) {
 	statePath := filepath.Join(baseDir, "state.json")
 	journalPath := filepath.Join(baseDir, "journal.jsonl")
 	equityPath := filepath.Join(baseDir, "equity.jsonl")
+	dailyReportPath := filepath.Join(baseDir, "daily_report.json")
 
 	state, err := loadState(statePath, cfg)
 	if err != nil {
@@ -248,6 +270,9 @@ func runCycle(configPath string) (Report, error) {
 		"realized_pnl": report.RealizedPnL,
 		"drawdown_pct": report.DrawdownPct,
 	}); err != nil {
+		return Report{}, err
+	}
+	if _, err := writeDailyReport(dailyReportPath, equityPath, journalPath, todayKey()); err != nil {
 		return Report{}, err
 	}
 	return report, nil
@@ -589,6 +614,132 @@ func applyHalts(state *State, cfg Config, equity float64) {
 		reason := "daily loss limit reached"
 		state.Halted = true
 		state.HaltReason = &reason
+	}
+}
+
+func writeDailyReport(reportPath, equityPath, journalPath, date string) (DailyReport, error) {
+	report, err := buildDailyReport(equityPath, journalPath, date)
+	if err != nil {
+		return DailyReport{}, err
+	}
+	if err := writeJSON(reportPath, report); err != nil {
+		return DailyReport{}, err
+	}
+	return report, nil
+}
+
+func buildDailyReport(equityPath, journalPath, date string) (DailyReport, error) {
+	equityRows, err := readEquityRows(equityPath, 10000)
+	if err != nil {
+		return DailyReport{}, err
+	}
+	journal, err := readJournal(journalPath, 10000)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return DailyReport{}, err
+	}
+
+	report := DailyReport{
+		Date:        date,
+		WorstTrades: []WorstTrade{},
+	}
+
+	var dayRows []EquityRow
+	for _, row := range equityRows {
+		if sameUTCDate(row.Time, date) {
+			dayRows = append(dayRows, row)
+		}
+	}
+	if len(dayRows) > 0 {
+		start := dayRows[0].Equity
+		end := dayRows[len(dayRows)-1].Equity
+		report.StartEquity = round6(start)
+		report.EndEquity = round6(end)
+		if start != 0 {
+			report.PerformancePct = round3((end/start - 1) * 100)
+		}
+
+		peak := dayRows[0].Equity
+		maxDrawdown := 0.0
+		for _, row := range dayRows {
+			if row.Equity > peak {
+				peak = row.Equity
+			}
+			if peak > 0 {
+				drawdown := (row.Equity/peak - 1) * 100
+				if drawdown < maxDrawdown {
+					maxDrawdown = drawdown
+				}
+			}
+		}
+		report.MaxDrawdownPct = round3(maxDrawdown)
+	}
+
+	for _, event := range journal {
+		if event["type"] != "sell" || !sameUTCDate(eventString(event, "time"), date) {
+			continue
+		}
+		trade := WorstTrade{
+			Time:   eventString(event, "time"),
+			Symbol: eventString(event, "symbol"),
+			Price:  eventFloat(event, "price"),
+			Qty:    eventFloat(event, "qty"),
+			PnL:    round6(eventFloat(event, "pnl")),
+			Reason: eventString(event, "reason"),
+		}
+		report.RealizedPnL = round6(report.RealizedPnL + trade.PnL)
+		report.TradeCount++
+		report.WorstTrades = append(report.WorstTrades, trade)
+	}
+	sort.Slice(report.WorstTrades, func(i, j int) bool {
+		return report.WorstTrades[i].PnL < report.WorstTrades[j].PnL
+	})
+	if len(report.WorstTrades) > 5 {
+		report.WorstTrades = report.WorstTrades[:5]
+	}
+
+	return report, nil
+}
+
+func sameUTCDate(value, date string) bool {
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return value == date
+	}
+	return t.UTC().Format("2006-01-02") == date
+}
+
+func eventString(event Event, key string) string {
+	value, ok := event[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+func eventFloat(event Event, key string) float64 {
+	value, ok := event[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch v := value.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case json.Number:
+		f, _ := v.Float64()
+		return f
+	default:
+		return 0
 	}
 }
 

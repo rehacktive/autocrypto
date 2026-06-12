@@ -38,8 +38,9 @@ go run . --config config.json --loop --sleep 5m
 - Puo usare un revisore AI opzionale prima degli ingressi.
 - Salva stato e diario in `state.json` e `journal.jsonl`.
 - Salva la curva capitale in `equity.jsonl`.
+- Salva il report giornaliero in `daily_report.json`.
 - Genera un report leggibile dopo ogni ciclo.
-- Espone una dashboard locale con capitale, posizioni, segnali e journal.
+- Espone una dashboard locale con capitale, posizioni, segnali, journal e report giornaliero.
 
 ## Cosa non fa ancora
 

@@ -23,13 +23,14 @@ type DashboardApp struct {
 }
 
 type StatusResponse struct {
-	Report       *Report     `json:"report"`
-	History      []EquityRow `json:"history"`
-	Journal      []Event     `json:"journal"`
-	LastError    string      `json:"last_error"`
-	Running      bool        `json:"running"`
-	NextInterval string      `json:"next_interval"`
-	CycleCount   int         `json:"cycle_count"`
+	Report       *Report      `json:"report"`
+	DailyReport  *DailyReport `json:"daily_report"`
+	History      []EquityRow  `json:"history"`
+	Journal      []Event      `json:"journal"`
+	LastError    string       `json:"last_error"`
+	Running      bool         `json:"running"`
+	NextInterval string       `json:"next_interval"`
+	CycleCount   int          `json:"cycle_count"`
 }
 
 type EquityRow struct {
@@ -117,6 +118,7 @@ func (app *DashboardApp) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	history, historyErr := readEquityRows(filepath.Join(app.baseDir, "equity.jsonl"), 300)
 	journal, journalErr := readJournal(filepath.Join(app.baseDir, "journal.jsonl"), 80)
+	dailyReport, dailyReportErr := readDailyReport(filepath.Join(app.baseDir, "daily_report.json"))
 	if history == nil {
 		history = []EquityRow{}
 	}
@@ -128,11 +130,14 @@ func (app *DashboardApp) handleStatus(w http.ResponseWriter, r *http.Request) {
 			lastError = historyErr.Error()
 		} else if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) {
 			lastError = journalErr.Error()
+		} else if dailyReportErr != nil && !errors.Is(dailyReportErr, os.ErrNotExist) {
+			lastError = dailyReportErr.Error()
 		}
 	}
 
 	writeAPIJSON(w, StatusResponse{
 		Report:       report,
+		DailyReport:  dailyReport,
 		History:      history,
 		Journal:      journal,
 		LastError:    lastError,
@@ -175,6 +180,14 @@ func readJournal(path string, limit int) ([]Event, error) {
 		return nil
 	})
 	return events, err
+}
+
+func readDailyReport(path string) (*DailyReport, error) {
+	var report DailyReport
+	if err := readJSON(path, &report); err != nil {
+		return nil, err
+	}
+	return &report, nil
 }
 
 func readJSONLLimited(path string, limit int, decode func([]byte) error) error {
@@ -439,6 +452,13 @@ const dashboardHTML = `<!doctype html>
         <h2>Journal</h2>
         <div class="panel-body"><table><thead><tr><th>Time</th><th>Type</th><th>Asset</th><th>Reason</th></tr></thead><tbody id="journal"></tbody></table></div>
       </div>
+      <div class="panel">
+        <h2>Daily report</h2>
+        <div class="panel-body">
+          <table><thead><tr><th>Date</th><th>Performance</th><th>Drawdown</th><th>PnL</th><th>Trades</th></tr></thead><tbody id="dailyReport"></tbody></table>
+          <table><thead><tr><th>Time</th><th>Asset</th><th>PnL</th><th>Reason</th></tr></thead><tbody id="worstTrades"></tbody></table>
+        </div>
+      </div>
     </section>
   </main>
   <script>
@@ -504,6 +524,7 @@ const dashboardHTML = `<!doctype html>
       renderPositions(report.positions || {});
       renderSignals(report.signals || []);
       renderJournal(data.journal || []);
+      renderDailyReport(data.daily_report);
       drawChart(document.getElementById("equityChart"), data.history || []);
     }
 
@@ -529,6 +550,20 @@ const dashboardHTML = `<!doctype html>
       document.getElementById("journal").innerHTML = latest.map(e =>
         "<tr><td>" + shortTime(e.time) + "</td><td>" + esc(e.type || "") + "</td><td>" + esc(e.symbol || "") + "</td><td>" + esc(e.reason || "") + "</td></tr>"
       ).join("") || "<tr><td colspan='4'>No trades yet</td></tr>";
+    }
+
+    function renderDailyReport(report) {
+      if (!report) {
+        document.getElementById("dailyReport").innerHTML = "<tr><td colspan='5'>No daily report yet</td></tr>";
+        document.getElementById("worstTrades").innerHTML = "<tr><td colspan='4'>No closed trades yet</td></tr>";
+        return;
+      }
+      document.getElementById("dailyReport").innerHTML =
+        "<tr><td>" + esc(report.date) + "</td><td>" + signedPct(report.performance_pct || 0) + "</td><td>" + (report.max_drawdown_pct || 0).toFixed(3) + "%</td><td>" + signed(report.realized_pnl || 0) + "</td><td>" + (report.trade_count || 0) + "</td></tr>";
+      const worst = report.worst_trades || [];
+      document.getElementById("worstTrades").innerHTML = worst.map(t =>
+        "<tr><td>" + shortTime(t.time) + "</td><td>" + esc(t.symbol || "") + "</td><td>" + signed(t.pnl || 0) + "</td><td>" + esc(t.reason || "") + "</td></tr>"
+      ).join("") || "<tr><td colspan='4'>No closed trades yet</td></tr>";
     }
 
     function drawChart(canvas, history) {

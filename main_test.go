@@ -311,6 +311,9 @@ func TestHandleStatusReturnsDashboardData(t *testing.T) {
 	if err := appendJSONL(filepath.Join(dir, "journal.jsonl"), Event{"type": "buy", "symbol": "BTCUSDT"}); err != nil {
 		t.Fatalf("append journal event: %v", err)
 	}
+	if err := writeJSON(filepath.Join(dir, "daily_report.json"), DailyReport{Date: todayKey(), EndEquity: 1100}); err != nil {
+		t.Fatalf("write daily report: %v", err)
+	}
 	report := &Report{Mode: "paper", Cash: 900, Equity: 1100}
 	app := &DashboardApp{
 		baseDir:    dir,
@@ -332,11 +335,94 @@ func TestHandleStatusReturnsDashboardData(t *testing.T) {
 	if status.Report == nil || status.Report.Equity != 1100 {
 		t.Fatalf("unexpected report in status response: %#v", status.Report)
 	}
+	if status.DailyReport == nil || status.DailyReport.EndEquity != 1100 {
+		t.Fatalf("unexpected daily report in status response: %#v", status.DailyReport)
+	}
 	if len(status.History) != 1 || len(status.Journal) != 1 || status.CycleCount != 1 {
 		t.Fatalf("unexpected history/journal response: %#v", status)
 	}
 	if status.NextInterval != "1m0s" {
 		t.Fatalf("expected interval 1m0s, got %q", status.NextInterval)
+	}
+}
+
+func TestBuildDailyReportSummarizesPerformanceAndWorstTrades(t *testing.T) {
+	dir := t.TempDir()
+	equityPath := filepath.Join(dir, "equity.jsonl")
+	journalPath := filepath.Join(dir, "journal.jsonl")
+	date := "2026-06-12"
+
+	for _, row := range []EquityRow{
+		{Time: "2026-06-11T23:55:00Z", Equity: 950, RealizedPnL: -50},
+		{Time: "2026-06-12T08:00:00Z", Equity: 1000, RealizedPnL: 0},
+		{Time: "2026-06-12T12:00:00Z", Equity: 1100, RealizedPnL: 20},
+		{Time: "2026-06-12T16:00:00Z", Equity: 990, RealizedPnL: -10},
+		{Time: "2026-06-12T20:00:00Z", Equity: 1050, RealizedPnL: 5},
+	} {
+		if err := appendJSONL(equityPath, row); err != nil {
+			t.Fatalf("append equity row: %v", err)
+		}
+	}
+
+	for _, event := range []Event{
+		{"time": "2026-06-12T09:00:00Z", "type": "buy", "symbol": "BTCUSDT"},
+		{"time": "2026-06-12T10:00:00Z", "type": "sell", "symbol": "BTCUSDT", "price": 100.0, "qty": 1.0, "pnl": -12.5, "reason": "stop_loss"},
+		{"time": "2026-06-12T11:00:00Z", "type": "sell", "symbol": "ETHUSDT", "price": 50.0, "qty": 2.0, "pnl": 7.0, "reason": "take_profit"},
+		{"time": "2026-06-12T12:00:00Z", "type": "sell", "symbol": "SOLUSDT", "price": 25.0, "qty": 4.0, "pnl": -20.0, "reason": "strategy_sell"},
+		{"time": "2026-06-13T10:00:00Z", "type": "sell", "symbol": "BNBUSDT", "pnl": -99.0, "reason": "other_day"},
+	} {
+		if err := appendJSONL(journalPath, event); err != nil {
+			t.Fatalf("append journal event: %v", err)
+		}
+	}
+
+	report, err := buildDailyReport(equityPath, journalPath, date)
+	if err != nil {
+		t.Fatalf("buildDailyReport returned error: %v", err)
+	}
+	if report.Date != date {
+		t.Fatalf("expected date %s, got %s", date, report.Date)
+	}
+	if report.StartEquity != 1000 || report.EndEquity != 1050 {
+		t.Fatalf("unexpected equity range: %#v", report)
+	}
+	if report.PerformancePct != 5 {
+		t.Fatalf("expected performance 5, got %v", report.PerformancePct)
+	}
+	if report.MaxDrawdownPct != -10 {
+		t.Fatalf("expected max drawdown -10, got %v", report.MaxDrawdownPct)
+	}
+	if report.TradeCount != 3 || report.RealizedPnL != -25.5 {
+		t.Fatalf("unexpected trade summary: %#v", report)
+	}
+	if len(report.WorstTrades) != 3 || report.WorstTrades[0].Symbol != "SOLUSDT" || report.WorstTrades[1].Symbol != "BTCUSDT" {
+		t.Fatalf("worst trades not sorted as expected: %#v", report.WorstTrades)
+	}
+}
+
+func TestWriteDailyReportPersistsJSON(t *testing.T) {
+	dir := t.TempDir()
+	equityPath := filepath.Join(dir, "equity.jsonl")
+	journalPath := filepath.Join(dir, "journal.jsonl")
+	reportPath := filepath.Join(dir, "daily_report.json")
+
+	if err := appendJSONL(equityPath, EquityRow{Time: "2026-06-12T08:00:00Z", Equity: 1000}); err != nil {
+		t.Fatalf("append equity row: %v", err)
+	}
+	report, err := writeDailyReport(reportPath, equityPath, journalPath, "2026-06-12")
+	if err != nil {
+		t.Fatalf("writeDailyReport returned error: %v", err)
+	}
+	if report.EndEquity != 1000 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+
+	loaded, err := readDailyReport(reportPath)
+	if err != nil {
+		t.Fatalf("readDailyReport returned error: %v", err)
+	}
+	if loaded == nil || loaded.Date != "2026-06-12" || loaded.EndEquity != 1000 {
+		t.Fatalf("unexpected persisted daily report: %#v", loaded)
 	}
 }
 
