@@ -171,6 +171,38 @@ func TestMaybeEnterPositionBlocksWhenTradeLimitReached(t *testing.T) {
 	}
 }
 
+func TestMaybeEnterPositionBlocksRejectedAISignal(t *testing.T) {
+	cfg := testConfig()
+	cfg.AI.Enabled = true
+	state := State{
+		Cash:            1000,
+		Positions:       map[string]Position{},
+		TradeCountByDay: map[string]int{},
+	}
+	signal := Signal{
+		Symbol:     "BTCUSDT",
+		Action:     "buy",
+		Price:      100,
+		Confidence: 0.8,
+		AIReview:   &AIReview{Approved: false, Confidence: 0.2, Reason: "weak setup"},
+	}
+	journalPath := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	event, err := maybeEnterPosition(&state, cfg, &signal, journalPath)
+	if err != nil {
+		t.Fatalf("maybeEnterPosition returned error: %v", err)
+	}
+	if event != nil {
+		t.Fatalf("expected rejected buy to return no trade event, got %#v", event)
+	}
+	if _, exists := state.Positions["BTCUSDT"]; exists {
+		t.Fatal("did not expect rejected AI signal to open a position")
+	}
+	if info, err := os.Stat(journalPath); err != nil || info.Size() == 0 {
+		t.Fatalf("expected blocked buy journal entry, info=%#v err=%v", info, err)
+	}
+}
+
 func TestMaybeExitPositionAppliesTakeProfit(t *testing.T) {
 	cfg := testConfig()
 	state := State{
@@ -197,6 +229,57 @@ func TestMaybeExitPositionAppliesTakeProfit(t *testing.T) {
 	}
 	if _, exists := state.Positions["BTCUSDT"]; exists {
 		t.Fatal("expected position to be closed")
+	}
+}
+
+func TestMaybeExitPositionSkipsRejectedStrategySell(t *testing.T) {
+	cfg := testConfig()
+	state := State{
+		Cash: 100,
+		Positions: map[string]Position{
+			"BTCUSDT": {EntryPrice: 100, Qty: 2, Cost: 200},
+		},
+	}
+	signal := Signal{
+		Symbol:   "BTCUSDT",
+		Action:   "sell",
+		Price:    101,
+		AIReview: &AIReview{Approved: false, Confidence: 0.3, Reason: "sell not justified"},
+	}
+
+	event, err := maybeExitPosition(&state, cfg, signal, filepath.Join(t.TempDir(), "journal.jsonl"))
+	if err != nil {
+		t.Fatalf("maybeExitPosition returned error: %v", err)
+	}
+	if event != nil {
+		t.Fatalf("expected rejected strategy sell to be skipped, got %#v", event)
+	}
+	if _, exists := state.Positions["BTCUSDT"]; !exists {
+		t.Fatal("expected position to remain open")
+	}
+}
+
+func TestMaybeExitPositionRiskExitIgnoresRejectedAI(t *testing.T) {
+	cfg := testConfig()
+	state := State{
+		Cash: 100,
+		Positions: map[string]Position{
+			"BTCUSDT": {EntryPrice: 100, Qty: 2, Cost: 200},
+		},
+	}
+	signal := Signal{
+		Symbol:   "BTCUSDT",
+		Action:   "hold",
+		Price:    95,
+		AIReview: &AIReview{Approved: false, Confidence: 0.1, Reason: "do not sell"},
+	}
+
+	event, err := maybeExitPosition(&state, cfg, signal, filepath.Join(t.TempDir(), "journal.jsonl"))
+	if err != nil {
+		t.Fatalf("maybeExitPosition returned error: %v", err)
+	}
+	if event == nil || event["reason"] != "stop_loss" {
+		t.Fatalf("expected stop-loss exit despite rejected AI review, got %#v", event)
 	}
 }
 
@@ -269,6 +352,25 @@ func TestAIReviewSignalDisabledAndUnsupportedProvider(t *testing.T) {
 	review = aiReviewSignal(cfg, signal, state)
 	if review.Approved || review.Reason != "unsupported AI provider" {
 		t.Fatalf("expected unsupported provider rejection, got %#v", review)
+	}
+}
+
+func TestReviewSignalsAnnotatesSignals(t *testing.T) {
+	cfg := testConfig()
+	state := State{Cash: 1000, Positions: map[string]Position{}}
+	signals := []Signal{
+		{Symbol: "BTCUSDT", Action: "buy", Price: 100},
+		{Symbol: "ETHUSDT", Action: "hold", Price: 50},
+	}
+
+	reviewSignals(cfg, signals, state)
+	for _, signal := range signals {
+		if signal.AIReview == nil {
+			t.Fatalf("expected AI review for signal %#v", signal)
+		}
+		if !signal.AIReview.Approved || signal.AIReview.Reason != "AI reviewer disabled" {
+			t.Fatalf("unexpected AI review for signal %#v", signal)
+		}
 	}
 }
 

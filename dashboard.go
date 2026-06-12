@@ -446,7 +446,7 @@ const dashboardHTML = `<!doctype html>
       </div>
       <div class="panel">
         <h2>Signals</h2>
-        <div class="panel-body"><table><thead><tr><th>Asset</th><th>Action</th><th>Price</th><th>Confidence</th><th>RSI</th></tr></thead><tbody id="signals"></tbody></table></div>
+        <div class="panel-body"><table><thead><tr><th>Asset</th><th>Action</th><th>Price</th><th>Confidence</th><th>RSI</th><th>AI</th></tr></thead><tbody id="signals"></tbody></table></div>
       </div>
       <div class="panel">
         <h2>Journal</h2>
@@ -541,8 +541,14 @@ const dashboardHTML = `<!doctype html>
 
     function renderSignals(signals) {
       document.getElementById("signals").innerHTML = signals.map(s =>
-        "<tr><td>" + esc(s.symbol) + "</td><td><span class='pill " + esc(s.action) + "'>" + esc(s.action) + "</span></td><td>" + fmtMoney.format(s.price) + "</td><td>" + (s.confidence * 100).toFixed(1) + "%</td><td>" + (s.rsi || 0).toFixed(2) + "</td></tr>"
-      ).join("") || "<tr><td colspan='5'>No signals yet</td></tr>";
+        "<tr><td>" + esc(s.symbol) + "</td><td><span class='pill " + esc(s.action) + "'>" + esc(s.action) + "</span></td><td>" + fmtMoney.format(s.price) + "</td><td>" + (s.confidence * 100).toFixed(1) + "%</td><td>" + (s.rsi || 0).toFixed(2) + "</td><td>" + renderAIReview(s.ai_review) + "</td></tr>"
+      ).join("") || "<tr><td colspan='6'>No signals yet</td></tr>";
+    }
+
+    function renderAIReview(review) {
+      if (!review) return "-";
+      const label = review.approved ? "ok" : "blocked";
+      return "<span class='pill " + (review.approved ? "" : "sell") + "'>" + label + "</span><div class='sub'>" + esc(review.reason || "") + "</div>";
     }
 
     function renderJournal(journal) {

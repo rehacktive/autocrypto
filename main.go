@@ -220,6 +220,8 @@ func runCycle(configPath string) (Report, error) {
 	}
 	applyHalts(&state, cfg, equity)
 
+	reviewSignals(cfg, signals, state)
+
 	if !state.Halted {
 		for i := range signals {
 			event, err := maybeExitPosition(&state, cfg, signals[i], journalPath)
@@ -368,7 +370,7 @@ func maybeExitPosition(state *State, cfg Config, signal Signal, journalPath stri
 		exitReason = "stop_loss"
 	case changePct >= cfg.Risk.TakeProfitPct:
 		exitReason = "take_profit"
-	case signal.Action == "sell":
+	case signal.Action == "sell" && !aiRejected(signal):
 		exitReason = "strategy_sell"
 	default:
 		return nil, nil
@@ -401,9 +403,8 @@ func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath st
 		return nil, nil
 	}
 
-	review := aiReviewSignal(cfg, *signal, *state)
-	signal.AIReview = &review
-	if !review.Approved {
+	ensureSignalAIReview(cfg, signal, *state)
+	if signal.AIReview != nil && !signal.AIReview.Approved {
 		event := Event{
 			"time":   time.Now().UTC().Format(time.RFC3339),
 			"type":   "blocked_buy",
@@ -449,6 +450,24 @@ func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath st
 	return event, appendJSONL(journalPath, event)
 }
 
+func reviewSignals(cfg Config, signals []Signal, state State) {
+	for i := range signals {
+		ensureSignalAIReview(cfg, &signals[i], state)
+	}
+}
+
+func ensureSignalAIReview(cfg Config, signal *Signal, state State) {
+	if signal.AIReview != nil {
+		return
+	}
+	review := aiReviewSignal(cfg, *signal, state)
+	signal.AIReview = &review
+}
+
+func aiRejected(signal Signal) bool {
+	return signal.AIReview != nil && !signal.AIReview.Approved
+}
+
 func aiReviewSignal(cfg Config, signal Signal, state State) AIReview {
 	if !cfg.AI.Enabled {
 		return AIReview{Approved: true, Confidence: 1, Reason: "AI reviewer disabled"}
@@ -464,7 +483,7 @@ func aiReviewSignal(cfg Config, signal Signal, state State) AIReview {
 		"starting_budget": cfg.StartingBudget,
 	})
 	if err != nil {
-		if cfg.AI.RequireApprovalForBuys {
+		if cfg.AI.RequireApprovalForBuys && signal.Action == "buy" {
 			return AIReview{Approved: false, Confidence: 0, Reason: "AI review failed: " + err.Error()}
 		}
 		return AIReview{Approved: true, Confidence: 0, Reason: "AI review unavailable: " + err.Error()}
@@ -479,7 +498,7 @@ func localAIReview(model string, payload map[string]any) (AIReview, error) {
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a conservative crypto trading risk reviewer. Return only JSON with keys approved, confidence, reason. Approve only if the quantitative signal is coherent and risk is not excessive.",
+				"content": "You are a conservative crypto trading signal reviewer. Return only JSON with keys approved, confidence, reason. Explain the quantitative signal briefly and reject it only if it is incoherent, low quality, or risk is excessive. You must not invent new trades.",
 			},
 			{
 				"role":    "user",

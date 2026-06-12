@@ -35,7 +35,7 @@ go run . --config config.json --loop --sleep 5m
 - Opera solo in paper trading.
 - Tiene posizioni virtuali su BTC, ETH e SOL.
 - Applica stop loss, take profit, limite di perdita giornaliera, limite di perdita totale, massimo trade al giorno.
-- Puo usare un revisore AI opzionale prima degli ingressi.
+- Puo usare un revisore AI opzionale che spiega o boccia i segnali.
 - Salva stato e diario in `state.json` e `journal.jsonl`.
 - Salva la curva capitale in `equity.jsonl`.
 - Salva il report giornaliero in `daily_report.json`.
@@ -78,7 +78,7 @@ Nel file `config.json` puoi abilitare:
 
 Il bot chiama un server locale compatibile OpenAI su `http://127.0.0.1:1234/v1/chat/completions`.
 
-Il revisore AI non genera trade da solo: riceve il segnale quantitativo e puo approvarlo o bocciarlo. Se `require_approval_for_buys` e attivo e l'AI non risponde, il bot non compra.
+Il revisore AI non genera trade da solo: riceve ogni segnale quantitativo e puo spiegarlo, approvarlo o bocciarlo. Se boccia un buy, il bot non compra; se boccia un sell strategico, il bot evita quell'uscita. Stop loss e take profit restano sempre prioritari. Se `require_approval_for_buys` e attivo e l'AI non risponde su un buy, il bot non compra.
 
 ## Perche questa forma
 
@@ -88,5 +88,4 @@ L'obiettivo e capire se una strategia ha un edge prima di rischiare capitale ver
 
 1. Far girare paper trading per 2-4 settimane.
 2. Aggiungere un report giornaliero con performance, drawdown e trade peggiori.
-3. Aggiungere un modulo AI opzionale che spiega o boccia i segnali.
-4. Solo dopo, valutare integrazione exchange con API key senza permesso di withdrawal.
+3. Solo dopo, valutare integrazione exchange con API key senza permesso di withdrawal.
