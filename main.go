@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -144,11 +145,54 @@ type WorstTrade struct {
 	Reason string  `json:"reason"`
 }
 
+type BacktestReport struct {
+	From           string              `json:"from"`
+	To             string              `json:"to"`
+	Interval       string              `json:"interval"`
+	Symbols        []string            `json:"symbols"`
+	Cycles         int                 `json:"cycles"`
+	Cash           float64             `json:"cash"`
+	Equity         float64             `json:"equity"`
+	RealizedPnL    float64             `json:"realized_pnl"`
+	PerformancePct float64             `json:"performance_pct"`
+	MaxDrawdownPct float64             `json:"max_drawdown_pct"`
+	Positions      map[string]Position `json:"positions"`
+	Events         []Event             `json:"events"`
+	DailyReports   []DailyReport       `json:"daily_reports"`
+}
+
+type BacktestStats struct {
+	ClosedTrades     int
+	Wins             int
+	Losses           int
+	WinRatePct       float64
+	GrossProfit      float64
+	GrossLoss        float64
+	NetPnL           float64
+	AverageTradePnL  float64
+	ProfitFactor     float64
+	BestTrade        WorstTrade
+	BestTradeOK      bool
+	WorstTrade       WorstTrade
+	WorstTradeOK     bool
+	BestDay          DailyReport
+	BestDayOK        bool
+	WorstDay         DailyReport
+	WorstDayOK       bool
+	TotalClosedBuys  int
+	TotalBlockedBuys int
+}
+
 func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	once := flag.Bool("once", false, "run a single cycle")
 	loop := flag.Bool("loop", false, "run forever")
 	serve := flag.Bool("serve", false, "start the local web dashboard")
+	backtest := flag.Bool("backtest", false, "run a historical backtest")
+	backtestNoAI := flag.Bool("backtest-no-ai", false, "disable AI reviews during backtest")
+	backtestFormat := flag.String("backtest-format", "json", "backtest output format: json or report")
+	from := flag.String("from", "", "backtest start date in YYYY-MM-DD format")
+	to := flag.String("to", "", "backtest end date in YYYY-MM-DD format")
 	addr := flag.String("addr", "127.0.0.1:8787", "web dashboard address")
 	sleep := flag.Duration("sleep", 5*time.Minute, "sleep duration between loop cycles")
 	flag.Parse()
@@ -160,8 +204,26 @@ func main() {
 		return
 	}
 
+	if *backtest {
+		report, err := runBacktest(*configPath, *from, *to, *backtestNoAI)
+		if err != nil {
+			exitErr(err.Error())
+		}
+		switch *backtestFormat {
+		case "json":
+			if err := printJSON(report); err != nil {
+				exitErr(err.Error())
+			}
+		case "report":
+			fmt.Print(formatBacktestReport(report))
+		default:
+			exitErr("unsupported --backtest-format: choose json or report")
+		}
+		return
+	}
+
 	if !*once && !*loop {
-		exitErr("choose --once, --loop, or --serve")
+		exitErr("choose --once, --loop, --serve, or --backtest")
 	}
 
 	for {
@@ -301,6 +363,59 @@ func fetchKlines(symbol, interval string, limit int) ([]Candle, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
 	}
+	return parseKlineRows(raw), nil
+}
+
+func fetchHistoricalKlines(symbol, interval string, start, end time.Time) ([]Candle, error) {
+	intervalMs, err := intervalDurationMillis(interval)
+	if err != nil {
+		return nil, err
+	}
+	var candles []Candle
+	startMs := start.UTC().UnixMilli()
+	endMs := end.UTC().UnixMilli()
+	for startMs < endMs {
+		url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=%s&startTime=%d&endTime=%d&limit=1000", binanceAPI, symbol, interval, startMs, endMs)
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("binance status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var raw [][]any
+		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+			_ = resp.Body.Close()
+			return nil, err
+		}
+		_ = resp.Body.Close()
+		if len(raw) == 0 {
+			break
+		}
+		batch := parseKlineRows(raw)
+		if len(batch) == 0 {
+			break
+		}
+		candles = append(candles, batch...)
+		lastOpenTime := batch[len(batch)-1].OpenTime
+		nextStart := lastOpenTime + intervalMs
+		if nextStart <= startMs {
+			break
+		}
+		startMs = nextStart
+	}
+	return candles, nil
+}
+
+func parseKlineRows(raw [][]any) []Candle {
 	candles := make([]Candle, 0, len(raw))
 	for _, row := range raw {
 		if len(row) < 7 {
@@ -316,7 +431,290 @@ func fetchKlines(symbol, interval string, limit int) ([]Candle, error) {
 			CloseTime: int64(row[6].(float64)),
 		})
 	}
-	return candles, nil
+	return candles
+}
+
+func runBacktest(configPath, from, to string, disableAI bool) (BacktestReport, error) {
+	if from == "" || to == "" {
+		return BacktestReport{}, errors.New("backtest requires --from and --to in YYYY-MM-DD format")
+	}
+	var cfg Config
+	if err := readJSON(configPath, &cfg); err != nil {
+		return BacktestReport{}, err
+	}
+	if cfg.Mode != "paper" {
+		return BacktestReport{}, errors.New("only paper mode is enabled in this version")
+	}
+	if disableAI {
+		cfg.AI.Enabled = false
+	}
+	start, end, err := parseBacktestRange(from, to)
+	if err != nil {
+		return BacktestReport{}, err
+	}
+
+	candlesBySymbol := map[string][]Candle{}
+	maxSteps := 0
+	for _, symbol := range cfg.Symbols {
+		candles, err := fetchHistoricalKlines(symbol, cfg.Interval, start, end)
+		if err != nil {
+			return BacktestReport{}, fmt.Errorf("fetch historical %s: %w", symbol, err)
+		}
+		if len(candles) < cfg.LookbackLimit {
+			return BacktestReport{}, fmt.Errorf("not enough historical candles for %s: got %d, need at least %d", symbol, len(candles), cfg.LookbackLimit)
+		}
+		candlesBySymbol[symbol] = candles
+		if maxSteps == 0 || len(candles) < maxSteps {
+			maxSteps = len(candles)
+		}
+	}
+	return simulateBacktest(cfg, candlesBySymbol, from, to, maxSteps), nil
+}
+
+func simulateBacktest(cfg Config, candlesBySymbol map[string][]Candle, from, to string, steps int) BacktestReport {
+	state := State{
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		Cash:            cfg.StartingBudget,
+		Positions:       map[string]Position{},
+		RealizedPnL:     0,
+		TradeCountByDay: map[string]int{},
+		DayStartEquity:  map[string]float64{},
+		Halted:          false,
+		HaltReason:      nil,
+		LastEquity:      cfg.StartingBudget,
+		HighWatermark:   cfg.StartingBudget,
+	}
+	events := []Event{}
+	equityRows := []EquityRow{}
+	startIndex := maxInt(cfg.LookbackLimit, maxInt(cfg.Strategy.SlowSMA, cfg.Strategy.RSIPeriod+1))
+	startIndex = maxInt(startIndex, 25)
+
+	for i := startIndex; i < steps; i++ {
+		latestPrices := map[string]float64{}
+		signals := make([]Signal, 0, len(cfg.Symbols))
+		cycleTime := ""
+		for _, symbol := range cfg.Symbols {
+			candles := candlesBySymbol[symbol][:i+1]
+			latest := candles[len(candles)-1]
+			if cycleTime == "" {
+				cycleTime = time.UnixMilli(latest.CloseTime).UTC().Format(time.RFC3339)
+			}
+			signal := buildSignal(symbol, candles, cfg)
+			latestPrices[symbol] = signal.Price
+			signals = append(signals, signal)
+		}
+
+		equity := estimateEquity(state, latestPrices)
+		state.LastEquity = equity
+		if equity > state.HighWatermark {
+			state.HighWatermark = equity
+		}
+		applyHaltsAt(&state, cfg, equity, dayKeyFromRFC3339(cycleTime))
+		reviewSignals(cfg, signals, state)
+
+		if !state.Halted {
+			for j := range signals {
+				event, err := maybeExitPositionAt(&state, cfg, signals[j], "", cycleTime)
+				if err == nil && event != nil {
+					events = append(events, event)
+				}
+			}
+			for j := range signals {
+				event, err := maybeEnterPositionAt(&state, cfg, &signals[j], "", cycleTime)
+				if err == nil && event != nil {
+					events = append(events, event)
+				}
+			}
+		}
+
+		finalEquity := estimateEquity(state, latestPrices)
+		state.LastEquity = finalEquity
+		if finalEquity > state.HighWatermark {
+			state.HighWatermark = finalEquity
+		}
+		equityRows = append(equityRows, EquityRow{
+			Time:        cycleTime,
+			Cash:        round6(state.Cash),
+			Equity:      round6(finalEquity),
+			RealizedPnL: round6(state.RealizedPnL),
+			DrawdownPct: round3((finalEquity/state.HighWatermark - 1) * 100),
+		})
+	}
+
+	endEquity := state.LastEquity
+	report := BacktestReport{
+		From:           from,
+		To:             to,
+		Interval:       cfg.Interval,
+		Symbols:        cfg.Symbols,
+		Cycles:         len(equityRows),
+		Cash:           round6(state.Cash),
+		Equity:         round6(endEquity),
+		RealizedPnL:    round6(state.RealizedPnL),
+		PerformancePct: 0,
+		MaxDrawdownPct: maxDrawdownFromRows(equityRows),
+		Positions:      state.Positions,
+		Events:         events,
+		DailyReports:   buildDailyReportsFromRows(equityRows, events),
+	}
+	if cfg.StartingBudget != 0 {
+		report.PerformancePct = round3((endEquity/cfg.StartingBudget - 1) * 100)
+	}
+	return report
+}
+
+func formatBacktestReport(report BacktestReport) string {
+	stats := summarizeBacktest(report)
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "Backtest report\n")
+	fmt.Fprintf(&b, "===============\n")
+	fmt.Fprintf(&b, "Periodo: %s -> %s | Timeframe: %s | Simboli: %s | Cicli: %d\n\n",
+		report.From, report.To, report.Interval, strings.Join(report.Symbols, ", "), report.Cycles)
+
+	fmt.Fprintf(&b, "Risultato\n")
+	fmt.Fprintf(&b, "- Equity finale: %.6f\n", report.Equity)
+	fmt.Fprintf(&b, "- Cash finale: %.6f\n", report.Cash)
+	fmt.Fprintf(&b, "- Performance: %+.3f%%\n", report.PerformancePct)
+	fmt.Fprintf(&b, "- PnL realizzato: %+.6f\n", report.RealizedPnL)
+	fmt.Fprintf(&b, "- Max drawdown: %.3f%%\n", report.MaxDrawdownPct)
+	fmt.Fprintf(&b, "- Posizioni aperte a fine test: %d\n\n", len(report.Positions))
+
+	fmt.Fprintf(&b, "Trade\n")
+	fmt.Fprintf(&b, "- Buy eseguiti: %d\n", stats.TotalClosedBuys)
+	fmt.Fprintf(&b, "- Buy bloccati dall'AI: %d\n", stats.TotalBlockedBuys)
+	fmt.Fprintf(&b, "- Trade chiusi: %d\n", stats.ClosedTrades)
+	fmt.Fprintf(&b, "- Win rate: %.2f%% (%d win / %d loss)\n", stats.WinRatePct, stats.Wins, stats.Losses)
+	fmt.Fprintf(&b, "- Profit factor: %s\n", formatProfitFactor(stats.ProfitFactor))
+	fmt.Fprintf(&b, "- PnL medio per trade chiuso: %+.6f\n\n", stats.AverageTradePnL)
+
+	fmt.Fprintf(&b, "Lettura rapida\n")
+	fmt.Fprintf(&b, "- %s\n", backtestVerdict(report, stats))
+	if stats.WorstTradeOK {
+		fmt.Fprintf(&b, "- Peggior trade: %s %+.6f (%s, %s)\n", stats.WorstTrade.Symbol, stats.WorstTrade.PnL, stats.WorstTrade.Reason, shortDateTime(stats.WorstTrade.Time))
+	}
+	if stats.BestTradeOK {
+		fmt.Fprintf(&b, "- Miglior trade: %s %+.6f (%s, %s)\n", stats.BestTrade.Symbol, stats.BestTrade.PnL, stats.BestTrade.Reason, shortDateTime(stats.BestTrade.Time))
+	}
+	if stats.WorstDayOK {
+		fmt.Fprintf(&b, "- Giorno peggiore: %s %+.3f%%, PnL %+.6f, drawdown %.3f%%\n", stats.WorstDay.Date, stats.WorstDay.PerformancePct, stats.WorstDay.RealizedPnL, stats.WorstDay.MaxDrawdownPct)
+	}
+	if stats.BestDayOK {
+		fmt.Fprintf(&b, "- Giorno migliore: %s %+.3f%%, PnL %+.6f\n", stats.BestDay.Date, stats.BestDay.PerformancePct, stats.BestDay.RealizedPnL)
+	}
+	fmt.Fprintf(&b, "\n")
+
+	if len(report.Positions) > 0 {
+		fmt.Fprintf(&b, "Posizioni aperte\n")
+		for symbol, pos := range report.Positions {
+			fmt.Fprintf(&b, "- %s qty %.6f, entry %.6f, cost %.6f\n", symbol, pos.Qty, pos.EntryPrice, pos.Cost)
+		}
+		fmt.Fprintf(&b, "\n")
+	}
+
+	if len(report.DailyReports) > 0 {
+		fmt.Fprintf(&b, "Ultimi giorni\n")
+		start := len(report.DailyReports) - 5
+		if start < 0 {
+			start = 0
+		}
+		for _, day := range report.DailyReports[start:] {
+			fmt.Fprintf(&b, "- %s: perf %+.3f%%, equity %.6f -> %.6f, trades %d, pnl %+.6f, dd %.3f%%\n",
+				day.Date, day.PerformancePct, day.StartEquity, day.EndEquity, day.TradeCount, day.RealizedPnL, day.MaxDrawdownPct)
+		}
+	}
+
+	return b.String()
+}
+
+func summarizeBacktest(report BacktestReport) BacktestStats {
+	stats := BacktestStats{}
+	for _, event := range report.Events {
+		switch eventString(event, "type") {
+		case "buy":
+			stats.TotalClosedBuys++
+		case "blocked_buy":
+			stats.TotalBlockedBuys++
+		case "sell":
+			trade := WorstTrade{
+				Time:   eventString(event, "time"),
+				Symbol: eventString(event, "symbol"),
+				Price:  eventFloat(event, "price"),
+				Qty:    eventFloat(event, "qty"),
+				PnL:    round6(eventFloat(event, "pnl")),
+				Reason: eventString(event, "reason"),
+			}
+			stats.ClosedTrades++
+			stats.NetPnL = round6(stats.NetPnL + trade.PnL)
+			if trade.PnL >= 0 {
+				stats.Wins++
+				stats.GrossProfit = round6(stats.GrossProfit + trade.PnL)
+			} else {
+				stats.Losses++
+				stats.GrossLoss = round6(stats.GrossLoss + -trade.PnL)
+			}
+			if !stats.BestTradeOK || trade.PnL > stats.BestTrade.PnL {
+				stats.BestTrade = trade
+				stats.BestTradeOK = true
+			}
+			if !stats.WorstTradeOK || trade.PnL < stats.WorstTrade.PnL {
+				stats.WorstTrade = trade
+				stats.WorstTradeOK = true
+			}
+		}
+	}
+	if stats.ClosedTrades > 0 {
+		stats.WinRatePct = round2(float64(stats.Wins) / float64(stats.ClosedTrades) * 100)
+		stats.AverageTradePnL = round6(stats.NetPnL / float64(stats.ClosedTrades))
+	}
+	switch {
+	case stats.GrossLoss > 0:
+		stats.ProfitFactor = round4(stats.GrossProfit / stats.GrossLoss)
+	case stats.GrossProfit > 0:
+		stats.ProfitFactor = math.Inf(1)
+	default:
+		stats.ProfitFactor = 0
+	}
+
+	for _, day := range report.DailyReports {
+		if !stats.BestDayOK || day.PerformancePct > stats.BestDay.PerformancePct {
+			stats.BestDay = day
+			stats.BestDayOK = true
+		}
+		if !stats.WorstDayOK || day.PerformancePct < stats.WorstDay.PerformancePct {
+			stats.WorstDay = day
+			stats.WorstDayOK = true
+		}
+	}
+	return stats
+}
+
+func backtestVerdict(report BacktestReport, stats BacktestStats) string {
+	switch {
+	case report.PerformancePct > 0 && stats.ProfitFactor >= 1.2 && report.MaxDrawdownPct > -5:
+		return "Backtest positivo: rendimento sopra zero, profit factor sano e drawdown contenuto."
+	case report.PerformancePct > 0:
+		return "Backtest leggermente positivo: utile guardare drawdown e qualita dei trade prima di fidarsi."
+	case report.PerformancePct > -1 && report.MaxDrawdownPct > -2:
+		return "Backtest quasi piatto: la strategia non sta ancora mostrando un edge chiaro."
+	default:
+		return "Backtest debole: performance negativa o drawdown da rivedere prima del paper trading prolungato."
+	}
+}
+
+func formatProfitFactor(value float64) string {
+	if math.IsInf(value, 1) {
+		return "inf"
+	}
+	return fmt.Sprintf("%.4f", value)
+}
+
+func shortDateTime(value string) string {
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return value
+	}
+	return t.UTC().Format("2006-01-02 15:04")
 }
 
 func buildSignal(symbol string, candles []Candle, cfg Config) Signal {
@@ -359,6 +757,10 @@ func buildSignal(symbol string, candles []Candle, cfg Config) Signal {
 }
 
 func maybeExitPosition(state *State, cfg Config, signal Signal, journalPath string) (Event, error) {
+	return maybeExitPositionAt(state, cfg, signal, journalPath, time.Now().UTC().Format(time.RFC3339))
+}
+
+func maybeExitPositionAt(state *State, cfg Config, signal Signal, journalPath, eventTime string) (Event, error) {
 	pos, ok := state.Positions[signal.Symbol]
 	if !ok {
 		return nil, nil
@@ -383,7 +785,7 @@ func maybeExitPosition(state *State, cfg Config, signal Signal, journalPath stri
 	delete(state.Positions, signal.Symbol)
 
 	event := Event{
-		"time":   time.Now().UTC().Format(time.RFC3339),
+		"time":   eventTime,
 		"type":   "sell",
 		"symbol": signal.Symbol,
 		"price":  signal.Price,
@@ -392,10 +794,17 @@ func maybeExitPosition(state *State, cfg Config, signal Signal, journalPath stri
 		"reason": exitReason,
 		"signal": signal,
 	}
+	if journalPath == "" {
+		return event, nil
+	}
 	return event, appendJSONL(journalPath, event)
 }
 
 func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath string) (Event, error) {
+	return maybeEnterPositionAt(state, cfg, signal, journalPath, time.Now().UTC().Format(time.RFC3339))
+}
+
+func maybeEnterPositionAt(state *State, cfg Config, signal *Signal, journalPath, eventTime string) (Event, error) {
 	if signal.Action != "buy" {
 		return nil, nil
 	}
@@ -406,16 +815,19 @@ func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath st
 	ensureSignalAIReview(cfg, signal, *state)
 	if signal.AIReview != nil && !signal.AIReview.Approved {
 		event := Event{
-			"time":   time.Now().UTC().Format(time.RFC3339),
+			"time":   eventTime,
 			"type":   "blocked_buy",
 			"symbol": signal.Symbol,
 			"reason": "ai_review_rejected",
 			"signal": signal,
 		}
+		if journalPath == "" {
+			return nil, nil
+		}
 		return nil, appendJSONL(journalPath, event)
 	}
 
-	day := todayKey()
+	day := dayKeyFromRFC3339(eventTime)
 	if state.TradeCountByDay[day] >= cfg.Risk.MaxTradesPerDay {
 		return nil, nil
 	}
@@ -430,7 +842,7 @@ func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath st
 	qty := notional / signal.Price
 	state.Cash -= notional
 	state.Positions[signal.Symbol] = Position{
-		EntryTime:  time.Now().UTC().Format(time.RFC3339),
+		EntryTime:  eventTime,
 		EntryPrice: signal.Price,
 		Qty:        qty,
 		Cost:       notional,
@@ -438,7 +850,7 @@ func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath st
 	state.TradeCountByDay[day]++
 
 	event := Event{
-		"time":     time.Now().UTC().Format(time.RFC3339),
+		"time":     eventTime,
 		"type":     "buy",
 		"symbol":   signal.Symbol,
 		"price":    signal.Price,
@@ -446,6 +858,9 @@ func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath st
 		"notional": round6(notional),
 		"reason":   "strategy_buy",
 		"signal":   signal,
+	}
+	if journalPath == "" {
+		return event, nil
 	}
 	return event, appendJSONL(journalPath, event)
 }
@@ -618,6 +1033,10 @@ func estimateEquity(state State, latestPrices map[string]float64) float64 {
 }
 
 func applyHalts(state *State, cfg Config, equity float64) {
+	applyHaltsAt(state, cfg, equity, todayKey())
+}
+
+func applyHaltsAt(state *State, cfg Config, equity float64, day string) {
 	totalFloor := cfg.StartingBudget * (1 - cfg.Risk.TotalLossStopPct)
 	if equity <= totalFloor {
 		reason := "total loss stop reached"
@@ -626,7 +1045,6 @@ func applyHalts(state *State, cfg Config, equity float64) {
 		return
 	}
 
-	day := todayKey()
 	dayStart, ok := state.DayStartEquity[day]
 	if !ok {
 		state.DayStartEquity[day] = equity
@@ -638,6 +1056,81 @@ func applyHalts(state *State, cfg Config, equity float64) {
 		state.Halted = true
 		state.HaltReason = &reason
 	}
+}
+
+func buildDailyReportsFromRows(equityRows []EquityRow, events []Event) []DailyReport {
+	rowsByDay := map[string][]EquityRow{}
+	days := []string{}
+	for _, row := range equityRows {
+		day := dayKeyFromRFC3339(row.Time)
+		if _, exists := rowsByDay[day]; !exists {
+			days = append(days, day)
+		}
+		rowsByDay[day] = append(rowsByDay[day], row)
+	}
+	sort.Strings(days)
+	reports := make([]DailyReport, 0, len(days))
+	for _, day := range days {
+		reports = append(reports, buildDailyReportFromRows(day, rowsByDay[day], events))
+	}
+	return reports
+}
+
+func buildDailyReportFromRows(date string, equityRows []EquityRow, events []Event) DailyReport {
+	report := DailyReport{Date: date, WorstTrades: []WorstTrade{}}
+	if len(equityRows) > 0 {
+		start := equityRows[0].Equity
+		end := equityRows[len(equityRows)-1].Equity
+		report.StartEquity = round6(start)
+		report.EndEquity = round6(end)
+		if start != 0 {
+			report.PerformancePct = round3((end/start - 1) * 100)
+		}
+		report.MaxDrawdownPct = maxDrawdownFromRows(equityRows)
+	}
+	for _, event := range events {
+		if event["type"] != "sell" || !sameUTCDate(eventString(event, "time"), date) {
+			continue
+		}
+		trade := WorstTrade{
+			Time:   eventString(event, "time"),
+			Symbol: eventString(event, "symbol"),
+			Price:  eventFloat(event, "price"),
+			Qty:    eventFloat(event, "qty"),
+			PnL:    round6(eventFloat(event, "pnl")),
+			Reason: eventString(event, "reason"),
+		}
+		report.RealizedPnL = round6(report.RealizedPnL + trade.PnL)
+		report.TradeCount++
+		report.WorstTrades = append(report.WorstTrades, trade)
+	}
+	sort.Slice(report.WorstTrades, func(i, j int) bool {
+		return report.WorstTrades[i].PnL < report.WorstTrades[j].PnL
+	})
+	if len(report.WorstTrades) > 5 {
+		report.WorstTrades = report.WorstTrades[:5]
+	}
+	return report
+}
+
+func maxDrawdownFromRows(equityRows []EquityRow) float64 {
+	if len(equityRows) == 0 {
+		return 0
+	}
+	peak := equityRows[0].Equity
+	maxDrawdown := 0.0
+	for _, row := range equityRows {
+		if row.Equity > peak {
+			peak = row.Equity
+		}
+		if peak > 0 {
+			drawdown := (row.Equity/peak - 1) * 100
+			if drawdown < maxDrawdown {
+				maxDrawdown = drawdown
+			}
+		}
+	}
+	return round3(maxDrawdown)
 }
 
 func writeDailyReport(reportPath, equityPath, journalPath, date string) (DailyReport, error) {
@@ -896,6 +1389,60 @@ func mustFloatString(value any) float64 {
 
 func todayKey() string {
 	return time.Now().UTC().Format("2006-01-02")
+}
+
+func dayKeyFromRFC3339(value string) string {
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return todayKey()
+	}
+	return t.UTC().Format("2006-01-02")
+}
+
+func parseBacktestRange(from, to string) (time.Time, time.Time, error) {
+	start, err := time.Parse("2006-01-02", from)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid --from date: %w", err)
+	}
+	end, err := time.Parse("2006-01-02", to)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid --to date: %w", err)
+	}
+	end = end.Add(24*time.Hour - time.Millisecond)
+	if !start.Before(end) {
+		return time.Time{}, time.Time{}, errors.New("--from must be before --to")
+	}
+	return start.UTC(), end.UTC(), nil
+}
+
+func intervalDurationMillis(interval string) (int64, error) {
+	if len(interval) < 2 {
+		return 0, fmt.Errorf("unsupported interval %q", interval)
+	}
+	unit := interval[len(interval)-1]
+	var amount int
+	if _, err := fmt.Sscanf(interval[:len(interval)-1], "%d", &amount); err != nil || amount <= 0 {
+		return 0, fmt.Errorf("unsupported interval %q", interval)
+	}
+	switch unit {
+	case 'm':
+		return int64(amount) * int64(time.Minute/time.Millisecond), nil
+	case 'h':
+		return int64(amount) * int64(time.Hour/time.Millisecond), nil
+	case 'd':
+		return int64(amount) * int64((24*time.Hour)/time.Millisecond), nil
+	case 'w':
+		return int64(amount) * int64((7*24*time.Hour)/time.Millisecond), nil
+	default:
+		return 0, fmt.Errorf("unsupported interval %q", interval)
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func absPath(path string) string {

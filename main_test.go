@@ -131,6 +131,143 @@ func TestBuildSignalBuySellAndInsufficientHistory(t *testing.T) {
 	}
 }
 
+func TestFetchHistoricalKlinesUsesDateRange(t *testing.T) {
+	previousClient := http.DefaultClient
+	t.Cleanup(func() {
+		http.DefaultClient = previousClient
+	})
+	requests := 0
+	http.DefaultClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			if req.URL.Query().Get("symbol") != "BTCUSDT" {
+				t.Fatalf("unexpected symbol query: %s", req.URL.RawQuery)
+			}
+			if req.URL.Query().Get("interval") != "1h" {
+				t.Fatalf("unexpected interval query: %s", req.URL.RawQuery)
+			}
+			if req.URL.Query().Get("startTime") == "" || req.URL.Query().Get("endTime") == "" {
+				t.Fatalf("expected startTime and endTime query params: %s", req.URL.RawQuery)
+			}
+			if requests > 1 {
+				return jsonResponse(`[]`), nil
+			}
+			return jsonResponse(`[
+				[1781222400000, "100", "101", "99", "100", "10", 1781225999999],
+				[1781226000000, "100", "102", "100", "101", "11", 1781229599999]
+			]`), nil
+		}),
+	}
+
+	start, end, err := parseBacktestRange("2026-06-12", "2026-06-12")
+	if err != nil {
+		t.Fatalf("parseBacktestRange returned error: %v", err)
+	}
+	candles, err := fetchHistoricalKlines("BTCUSDT", "1h", start, end)
+	if err != nil {
+		t.Fatalf("fetchHistoricalKlines returned error: %v", err)
+	}
+	if len(candles) != 2 || candles[1].Close != 101 {
+		t.Fatalf("unexpected candles: %#v", candles)
+	}
+}
+
+func TestParseBacktestRangeIncludesToDateOnly(t *testing.T) {
+	start, end, err := parseBacktestRange("2026-06-01", "2026-06-03")
+	if err != nil {
+		t.Fatalf("parseBacktestRange returned error: %v", err)
+	}
+	if start.Format(time.RFC3339) != "2026-06-01T00:00:00Z" {
+		t.Fatalf("unexpected start %s", start.Format(time.RFC3339))
+	}
+	if end.Format(time.RFC3339Nano) != "2026-06-03T23:59:59.999Z" {
+		t.Fatalf("unexpected end %s", end.Format(time.RFC3339Nano))
+	}
+}
+
+func TestSimulateBacktestProducesReport(t *testing.T) {
+	cfg := testConfig()
+	cfg.LookbackLimit = 26
+	cfg.Strategy.MinConfidence = 0
+	candlesBySymbol := map[string][]Candle{
+		"BTCUSDT": historicalCandles(100, 36),
+	}
+	cfg.Symbols = []string{"BTCUSDT"}
+
+	report := simulateBacktest(cfg, candlesBySymbol, "2026-06-12", "2026-06-13", len(candlesBySymbol["BTCUSDT"]))
+	if report.From != "2026-06-12" || report.To != "2026-06-13" {
+		t.Fatalf("unexpected report range: %#v", report)
+	}
+	if report.Cycles == 0 {
+		t.Fatal("expected backtest cycles")
+	}
+	if report.Equity <= 0 {
+		t.Fatalf("expected positive final equity, got %v", report.Equity)
+	}
+	if len(report.DailyReports) == 0 {
+		t.Fatal("expected daily reports")
+	}
+}
+
+func TestFormatBacktestReportIncludesUsefulSummary(t *testing.T) {
+	report := BacktestReport{
+		From:           "2026-06-01",
+		To:             "2026-06-03",
+		Interval:       "1h",
+		Symbols:        []string{"BTCUSDT", "ETHUSDT"},
+		Cycles:         42,
+		Cash:           1005,
+		Equity:         1005,
+		RealizedPnL:    5,
+		PerformancePct: 0.5,
+		MaxDrawdownPct: -1.2,
+		Positions:      map[string]Position{},
+		Events: []Event{
+			{"time": "2026-06-01T10:00:00Z", "type": "buy", "symbol": "BTCUSDT"},
+			{"time": "2026-06-01T12:00:00Z", "type": "sell", "symbol": "BTCUSDT", "price": 101.0, "qty": 1.0, "pnl": 7.0, "reason": "take_profit"},
+			{"time": "2026-06-02T10:00:00Z", "type": "buy", "symbol": "ETHUSDT"},
+			{"time": "2026-06-02T12:00:00Z", "type": "sell", "symbol": "ETHUSDT", "price": 99.0, "qty": 1.0, "pnl": -2.0, "reason": "strategy_sell"},
+		},
+		DailyReports: []DailyReport{
+			{Date: "2026-06-01", StartEquity: 1000, EndEquity: 1007, PerformancePct: 0.7, RealizedPnL: 7, MaxDrawdownPct: -0.1, TradeCount: 1},
+			{Date: "2026-06-02", StartEquity: 1007, EndEquity: 1005, PerformancePct: -0.199, RealizedPnL: -2, MaxDrawdownPct: -0.5, TradeCount: 1},
+		},
+	}
+
+	text := formatBacktestReport(report)
+	for _, want := range []string{
+		"Backtest report",
+		"Performance: +0.500%",
+		"Win rate: 50.00% (1 win / 1 loss)",
+		"Profit factor: 3.5000",
+		"Peggior trade: ETHUSDT -2.000000",
+		"Giorno peggiore: 2026-06-02 -0.199%",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected report to contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+func historicalCandles(startPrice float64, count int) []Candle {
+	candles := make([]Candle, 0, count)
+	start := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < count; i++ {
+		price := startPrice + float64(i)
+		openTime := start.Add(time.Duration(i) * time.Hour)
+		candles = append(candles, Candle{
+			OpenTime:  openTime.UnixMilli(),
+			Open:      price,
+			High:      price + 1,
+			Low:       price - 1,
+			Close:     price,
+			Volume:    10,
+			CloseTime: openTime.Add(time.Hour - time.Millisecond).UnixMilli(),
+		})
+	}
+	return candles
+}
+
 func TestMaybeEnterPositionBuysWithinRiskLimits(t *testing.T) {
 	cfg := testConfig()
 	state := State{
