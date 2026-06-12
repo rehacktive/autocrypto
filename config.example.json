@@ -8,8 +8,8 @@
   "ai": {
     "enabled": false,
     "require_approval_for_buys": true,
-    "provider": "openai",
-    "model": "gpt-4.1-mini"
+    "provider": "local",
+    "model": "nvidia/nemotron-3-nano-4b"
   },
   "risk": {
     "max_position_pct": 0.25,

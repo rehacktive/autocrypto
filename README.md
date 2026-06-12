@@ -70,16 +70,12 @@ Nel file `config.json` puoi abilitare:
 "ai": {
   "enabled": true,
   "require_approval_for_buys": true,
-  "provider": "openai",
-  "model": "gpt-4.1-mini"
+  "provider": "local",
+  "model": "nvidia/nemotron-3-nano-4b"
 }
 ```
 
-Poi esporta la chiave:
-
-```bash
-export OPENAI_API_KEY="..."
-```
+Il bot chiama un server locale compatibile OpenAI su `http://127.0.0.1:1234/v1/chat/completions`.
 
 Il revisore AI non genera trade da solo: riceve il segnale quantitativo e puo approvarlo o bocciarlo. Se `require_approval_for_buys` e attivo e l'AI non risponde, il bot non compra.
 

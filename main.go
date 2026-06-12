@@ -16,7 +16,7 @@ import (
 
 const (
 	binanceAPI = "https://api.binance.com"
-	openAIAPI  = "https://api.openai.com/v1/responses"
+	localAIAPI = "http://127.0.0.1:1234/v1/chat/completions"
 	userAgent  = "crypto-ai-paper-bot-go/0.1"
 )
 
@@ -428,10 +428,10 @@ func aiReviewSignal(cfg Config, signal Signal, state State) AIReview {
 	if !cfg.AI.Enabled {
 		return AIReview{Approved: true, Confidence: 1, Reason: "AI reviewer disabled"}
 	}
-	if cfg.AI.Provider != "openai" {
+	if cfg.AI.Provider != "local" && cfg.AI.Provider != "openai" {
 		return AIReview{Approved: false, Confidence: 0, Reason: "unsupported AI provider"}
 	}
-	review, err := openAIReview(cfg.AI.Model, map[string]any{
+	review, err := localAIReview(cfg.AI.Model, map[string]any{
 		"signal":          signal,
 		"cash":            state.Cash,
 		"positions":       state.Positions,
@@ -447,18 +447,24 @@ func aiReviewSignal(cfg Config, signal Signal, state State) AIReview {
 	return review
 }
 
-func openAIReview(model string, payload map[string]any) (AIReview, error) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		return AIReview{}, errors.New("OPENAI_API_KEY is not set")
-	}
+func localAIReview(model string, payload map[string]any) (AIReview, error) {
 	payloadBytes, _ := json.Marshal(payload)
 	body := map[string]any{
 		"model": model,
-		"input": "You are a conservative crypto trading risk reviewer. Return only JSON with keys approved, confidence, reason. Approve only if the quantitative signal is coherent and risk is not excessive. Payload: " + string(payloadBytes),
-		"text": map[string]any{
-			"format": map[string]any{
-				"type":   "json_schema",
+		"messages": []map[string]string{
+			{
+				"role":    "system",
+				"content": "You are a conservative crypto trading risk reviewer. Return only JSON with keys approved, confidence, reason. Approve only if the quantitative signal is coherent and risk is not excessive.",
+			},
+			{
+				"role":    "user",
+				"content": "Payload: " + string(payloadBytes),
+			},
+		},
+		"temperature": 0,
+		"response_format": map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
 				"name":   "trade_review",
 				"strict": true,
 				"schema": map[string]any{
@@ -475,11 +481,10 @@ func openAIReview(model string, payload map[string]any) (AIReview, error) {
 		},
 	}
 	reqBytes, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, openAIAPI, bytes.NewReader(reqBytes))
+	req, err := http.NewRequest(http.MethodPost, localAIAPI, bytes.NewReader(reqBytes))
 	if err != nil {
 		return AIReview{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 
@@ -490,32 +495,35 @@ func openAIReview(model string, payload map[string]any) (AIReview, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return AIReview{}, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(body))
+		return AIReview{}, fmt.Errorf("local AI status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var data struct {
-		Output []struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return AIReview{}, err
 	}
-	for _, output := range data.Output {
-		for _, content := range output.Content {
-			if content.Type == "output_text" {
-				var review AIReview
-				if err := json.Unmarshal([]byte(content.Text), &review); err != nil {
-					return AIReview{}, err
-				}
-				return review, nil
-			}
+	for _, choice := range data.Choices {
+		content := choice.Message.Content
+		if content == "" {
+			content = choice.Message.ReasoningContent
 		}
+		if content == "" {
+			continue
+		}
+		var review AIReview
+		if err := json.Unmarshal([]byte(content), &review); err != nil {
+			return AIReview{}, err
+		}
+		return review, nil
 	}
-	return AIReview{}, errors.New("OpenAI response did not include output text")
+	return AIReview{}, errors.New("local AI response did not include message content")
 }
 
 func loadState(path string, cfg Config) (State, error) {
