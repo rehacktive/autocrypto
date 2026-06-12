@@ -1,0 +1,31 @@
+{
+  "mode": "paper",
+  "quote_asset": "USDT",
+  "starting_budget": 1000.0,
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  "interval": "1h",
+  "lookback_limit": 180,
+  "ai": {
+    "enabled": false,
+    "require_approval_for_buys": true,
+    "provider": "openai",
+    "model": "gpt-4.1-mini"
+  },
+  "risk": {
+    "max_position_pct": 0.25,
+    "max_trade_risk_pct": 0.01,
+    "daily_loss_limit_pct": 0.03,
+    "total_loss_stop_pct": 0.25,
+    "max_trades_per_day": 4,
+    "stop_loss_pct": 0.035,
+    "take_profit_pct": 0.07
+  },
+  "strategy": {
+    "fast_sma": 12,
+    "slow_sma": 48,
+    "rsi_period": 14,
+    "buy_rsi_max": 62,
+    "sell_rsi_min": 74,
+    "min_confidence": 0.62
+  }
+}
