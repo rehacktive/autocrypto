@@ -2,13 +2,29 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func jsonResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
 
 func testConfig() Config {
 	return Config{
@@ -352,6 +368,39 @@ func TestAIReviewSignalDisabledAndUnsupportedProvider(t *testing.T) {
 	review = aiReviewSignal(cfg, signal, state)
 	if review.Approved || review.Reason != "unsupported AI provider" {
 		t.Fatalf("expected unsupported provider rejection, got %#v", review)
+	}
+}
+
+func TestAIReviewSignalNeverBlocksHoldWhenModelRejectsIt(t *testing.T) {
+	cfg := testConfig()
+	cfg.AI.Enabled = true
+	signal := Signal{Symbol: "BTCUSDT", Action: "hold", Price: 100}
+	state := State{Cash: 1000, Positions: map[string]Position{}}
+
+	previousClient := http.DefaultClient
+	t.Cleanup(func() {
+		http.DefaultClient = previousClient
+	})
+	http.DefaultClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(`{
+				"choices": [
+					{
+						"message": {
+							"content": "{\"approved\":false,\"confidence\":0.48,\"reason\":\"low confidence and no directional bias\"}"
+						}
+					}
+				]
+			}`), nil
+		}),
+	}
+
+	review := aiReviewSignal(cfg, signal, state)
+	if !review.Approved {
+		t.Fatalf("expected hold review to be accepted, got %#v", review)
+	}
+	if review.Reason != "Hold accepted: low confidence and no directional bias" {
+		t.Fatalf("unexpected hold reason %q", review.Reason)
 	}
 }
 

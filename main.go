@@ -488,6 +488,10 @@ func aiReviewSignal(cfg Config, signal Signal, state State) AIReview {
 		}
 		return AIReview{Approved: true, Confidence: 0, Reason: "AI review unavailable: " + err.Error()}
 	}
+	if signal.Action == "hold" && !review.Approved {
+		review.Approved = true
+		review.Reason = "Hold accepted: " + review.Reason
+	}
 	return review
 }
 
@@ -498,7 +502,7 @@ func localAIReview(model string, payload map[string]any) (AIReview, error) {
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a conservative crypto trading signal reviewer. Return only JSON with keys approved, confidence, reason. Explain the quantitative signal briefly and reject it only if it is incoherent, low quality, or risk is excessive. You must not invent new trades.",
+				"content": "You are a conservative crypto trading signal reviewer. Return only JSON with keys approved, confidence, reason. Explain the quantitative signal briefly. Interpret approved as whether the proposed action is reasonable, not whether a trade should be opened. For action=hold, low confidence, neutral RSI, weak trend, or lack of directional edge usually support the hold and should be approved; reject hold only if the metrics contradict holding. For action=buy or action=sell, reject if the signal is incoherent, low quality, or risk is excessive. You must not invent new trades.",
 			},
 			{
 				"role":    "user",
