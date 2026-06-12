@@ -221,15 +221,18 @@ const dashboardHTML = `<!doctype html>
   <title>Autocrypto Dashboard</title>
   <style>
     :root {
-      --bg: #f6f7f9;
-      --panel: #ffffff;
-      --ink: #18202a;
-      --muted: #687384;
-      --line: #d9dee7;
-      --good: #13795b;
-      --bad: #b42318;
-      --warn: #a15c07;
-      --accent: #1f6feb;
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --panel: #121821;
+      --panel-soft: #171f2a;
+      --ink: #edf2f7;
+      --muted: #95a3b8;
+      --line: #273241;
+      --good: #49d18d;
+      --bad: #ff6b6b;
+      --warn: #f4b740;
+      --accent: #68a7ff;
+      --accent-strong: #2f7ff0;
     }
     * { box-sizing: border-box; }
     body {
@@ -253,8 +256,8 @@ const dashboardHTML = `<!doctype html>
     }
     h1 { font-size: 20px; margin: 0; font-weight: 700; }
     button {
-      border: 1px solid #165dbd;
-      background: var(--accent);
+      border: 1px solid var(--accent-strong);
+      background: var(--accent-strong);
       color: white;
       border-radius: 6px;
       padding: 9px 12px;
@@ -264,6 +267,10 @@ const dashboardHTML = `<!doctype html>
     button:disabled {
       opacity: 0.65;
       cursor: wait;
+    }
+    button:hover:not(:disabled) {
+      background: #3d8cff;
+      border-color: #63a5ff;
     }
     main {
       max-width: 1280px;
@@ -297,6 +304,7 @@ const dashboardHTML = `<!doctype html>
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
     }
     .metric {
       padding: 14px;
@@ -364,16 +372,16 @@ const dashboardHTML = `<!doctype html>
       padding: 3px 8px;
       font-size: 12px;
       font-weight: 800;
-      background: #eef2f7;
-      color: #303948;
+      background: var(--panel-soft);
+      color: var(--ink);
     }
-    .pill.buy { background: #e8f5ef; color: var(--good); }
-    .pill.sell { background: #fdecec; color: var(--bad); }
+    .pill.buy { background: rgba(73, 209, 141, 0.14); color: var(--good); }
+    .pill.sell { background: rgba(255, 107, 107, 0.14); color: var(--bad); }
     .errorbox {
       display: none;
       margin-bottom: 16px;
-      background: #fff4f2;
-      border: 1px solid #ffc9c2;
+      background: rgba(255, 107, 107, 0.12);
+      border: 1px solid rgba(255, 107, 107, 0.35);
       color: var(--bad);
       border-radius: 8px;
       padding: 12px 14px;
@@ -532,7 +540,7 @@ const dashboardHTML = `<!doctype html>
       ctx.scale(ratio, ratio);
       const w = rect.width, h = rect.height, pad = 34;
       ctx.clearRect(0, 0, w, h);
-      ctx.strokeStyle = "#d9dee7";
+      ctx.strokeStyle = "#273241";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(pad, 12);
@@ -540,7 +548,7 @@ const dashboardHTML = `<!doctype html>
       ctx.lineTo(w - 10, h - pad);
       ctx.stroke();
       if (!history.length) {
-        ctx.fillStyle = "#687384";
+        ctx.fillStyle = "#95a3b8";
         ctx.fillText("Waiting for simulation data", pad + 8, 42);
         return;
       }
@@ -549,7 +557,7 @@ const dashboardHTML = `<!doctype html>
       if (min === max) { min -= 1; max += 1; }
       const xFor = i => pad + (i / Math.max(1, history.length - 1)) * (w - pad - 16);
       const yFor = v => 12 + (1 - (v - min) / (max - min)) * (h - pad - 18);
-      ctx.strokeStyle = "#1f6feb";
+      ctx.strokeStyle = "#68a7ff";
       ctx.lineWidth = 2;
       ctx.beginPath();
       history.forEach((p, i) => {
@@ -557,7 +565,7 @@ const dashboardHTML = `<!doctype html>
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.stroke();
-      ctx.fillStyle = "#687384";
+      ctx.fillStyle = "#95a3b8";
       ctx.fillText(fmtMoney.format(max), 6, 22);
       ctx.fillText(fmtMoney.format(min), 6, h - pad);
     }
