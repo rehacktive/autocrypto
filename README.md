@@ -107,6 +107,31 @@ Il bot chiama un server locale compatibile OpenAI su `http://127.0.0.1:1234/v1/c
 
 Il revisore AI non genera trade da solo: riceve ogni segnale quantitativo e puo spiegarlo, approvarlo o bocciarlo. Se boccia un buy, il bot non compra; se boccia un sell strategico, il bot evita quell'uscita. Stop loss e take profit restano sempre prioritari. Se `require_approval_for_buys` e attivo e l'AI non risponde su un buy, il bot non compra.
 
+## Strategie esoteriche opzionali
+
+La strategia classica resta il default. Per provare moduli aggiuntivi senza cambiare il motore di rischio puoi abilitare una strategia ensemble:
+
+```json
+"strategy": {
+  "mode": "ensemble",
+  "enabled_modules": ["chaos_gate", "volume_echo", "regime_oracle"],
+  "ensemble_min_votes": 2,
+  "fast_sma": 12,
+  "slow_sma": 48,
+  "rsi_period": 14,
+  "buy_rsi_max": 62,
+  "sell_rsi_min": 74,
+  "min_confidence": 0.62,
+  "chaos_period": 18,
+  "chaos_min_efficiency": 0.28,
+  "volume_period": 24,
+  "volume_spike_multiplier": 1.6,
+  "regime_period": 48
+}
+```
+
+`chaos_gate` misura quanto il movimento e direzionale rispetto al rumore e puo bloccare buy in fasi troppo confuse. `volume_echo` cerca accelerazioni di volume con momentum coerente. `regime_oracle` classifica il mercato in trend, chop, squeeze, panic o mixed e modifica la confidenza. Con `mode: "ensemble"` i moduli confermano o filtrano la strategia classica; con `mode: "parallel"` possono generare un buy anche quando la strategia classica e in hold, se raggiungono i voti minimi.
+
 ## Backtest storico
 
 La modalita backtest scarica candele storiche da Binance per i simboli configurati e simula il periodo in memoria, senza modificare `state.json` o `journal.jsonl`.

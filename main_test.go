@@ -130,6 +130,66 @@ func TestBuildSignalBuySellAndInsufficientHistory(t *testing.T) {
 	if hold.Action != "hold" || hold.Reason != "not enough market history" {
 		t.Fatalf("expected insufficient-history hold, got %q with reason %q", hold.Action, hold.Reason)
 	}
+	if buy.StrategyMode != "" || len(buy.Modules) != 0 {
+		t.Fatalf("expected default strategy to stay classic without module annotations, got mode=%q modules=%#v", buy.StrategyMode, buy.Modules)
+	}
+}
+
+func TestEsotericChaosGateCanVetoNoisyBuy(t *testing.T) {
+	cfg := testConfig()
+	cfg.Strategy.Mode = "ensemble"
+	cfg.Strategy.EnabledModules = []string{"chaos_gate"}
+	cfg.Strategy.EnsembleMinVotes = 1
+	cfg.Strategy.ChaosPeriod = 12
+	cfg.Strategy.ChaosMinEfficiency = 0.4
+
+	closes := []float64{}
+	for i := 0; i < 28; i++ {
+		if i%2 == 0 {
+			closes = append(closes, 100)
+		} else {
+			closes = append(closes, 102)
+		}
+	}
+	closes = append(closes, 100, 103)
+	signal := buildSignal("BTCUSDT", candlesFromCloses(closes...), cfg)
+	if signal.Action != "hold" {
+		t.Fatalf("expected chaos gate to veto noisy buy, got %q with reason %q", signal.Action, signal.Reason)
+	}
+	if signal.StrategyMode != "ensemble" || len(signal.Modules) != 1 || !signal.Modules[0].VetoBuy {
+		t.Fatalf("expected chaos gate annotation with veto, got %#v", signal)
+	}
+}
+
+func TestEsotericParallelVolumeEchoCanBuy(t *testing.T) {
+	cfg := testConfig()
+	cfg.Strategy.Mode = "parallel"
+	cfg.Strategy.EnabledModules = []string{"volume_echo"}
+	cfg.Strategy.EnsembleMinVotes = 1
+	cfg.Strategy.MinConfidence = 0
+	cfg.Strategy.BuyRSIMax = 10
+	cfg.Strategy.SellRSIMin = 101
+	cfg.Strategy.VolumePeriod = 8
+	cfg.Strategy.VolumeSpikeMultiplier = 1.5
+
+	closes := make([]float64, 26)
+	for i := range closes {
+		closes[i] = 100
+	}
+	closes = append(closes, 101)
+	candles := candlesFromCloses(closes...)
+	for i := range candles {
+		candles[i].Volume = 10
+	}
+	candles[len(candles)-1].Volume = 40
+
+	signal := buildSignal("BTCUSDT", candles, cfg)
+	if signal.Action != "buy" {
+		t.Fatalf("expected parallel volume echo buy, got %q with reason %q", signal.Action, signal.Reason)
+	}
+	if signal.StrategyMode != "parallel" || len(signal.Modules) != 1 || signal.Modules[0].Name != "volume_echo" {
+		t.Fatalf("expected volume echo annotation, got %#v", signal)
+	}
 }
 
 func TestFetchHistoricalKlinesUsesDateRange(t *testing.T) {

@@ -53,12 +53,20 @@ type Risk struct {
 }
 
 type Strategy struct {
-	FastSMA       int     `json:"fast_sma"`
-	SlowSMA       int     `json:"slow_sma"`
-	RSIPeriod     int     `json:"rsi_period"`
-	BuyRSIMax     float64 `json:"buy_rsi_max"`
-	SellRSIMin    float64 `json:"sell_rsi_min"`
-	MinConfidence float64 `json:"min_confidence"`
+	Mode                  string   `json:"mode,omitempty"`
+	EnabledModules        []string `json:"enabled_modules,omitempty"`
+	EnsembleMinVotes      int      `json:"ensemble_min_votes,omitempty"`
+	FastSMA               int      `json:"fast_sma"`
+	SlowSMA               int      `json:"slow_sma"`
+	RSIPeriod             int      `json:"rsi_period"`
+	BuyRSIMax             float64  `json:"buy_rsi_max"`
+	SellRSIMin            float64  `json:"sell_rsi_min"`
+	MinConfidence         float64  `json:"min_confidence"`
+	ChaosPeriod           int      `json:"chaos_period,omitempty"`
+	ChaosMinEfficiency    float64  `json:"chaos_min_efficiency,omitempty"`
+	VolumePeriod          int      `json:"volume_period,omitempty"`
+	VolumeSpikeMultiplier float64  `json:"volume_spike_multiplier,omitempty"`
+	RegimePeriod          int      `json:"regime_period,omitempty"`
 }
 
 type Costs struct {
@@ -97,23 +105,34 @@ type Candle struct {
 }
 
 type Signal struct {
-	Symbol          string    `json:"symbol"`
-	Action          string    `json:"action"`
-	Confidence      float64   `json:"confidence"`
-	Price           float64   `json:"price"`
-	FastSMA         float64   `json:"fast_sma,omitempty"`
-	SlowSMA         float64   `json:"slow_sma,omitempty"`
-	RSI             float64   `json:"rsi,omitempty"`
-	Volatility      float64   `json:"volatility,omitempty"`
-	Reason          string    `json:"reason"`
-	ExecutionReason string    `json:"execution_reason,omitempty"`
-	AIReview        *AIReview `json:"ai_review,omitempty"`
+	Symbol          string                 `json:"symbol"`
+	Action          string                 `json:"action"`
+	Confidence      float64                `json:"confidence"`
+	Price           float64                `json:"price"`
+	FastSMA         float64                `json:"fast_sma,omitempty"`
+	SlowSMA         float64                `json:"slow_sma,omitempty"`
+	RSI             float64                `json:"rsi,omitempty"`
+	Volatility      float64                `json:"volatility,omitempty"`
+	StrategyMode    string                 `json:"strategy_mode,omitempty"`
+	Modules         []StrategyModuleResult `json:"strategy_modules,omitempty"`
+	Reason          string                 `json:"reason"`
+	ExecutionReason string                 `json:"execution_reason,omitempty"`
+	AIReview        *AIReview              `json:"ai_review,omitempty"`
 }
 
 type AIReview struct {
 	Approved   bool    `json:"approved"`
 	Confidence float64 `json:"confidence"`
 	Reason     string  `json:"reason"`
+}
+
+type StrategyModuleResult struct {
+	Name            string  `json:"name"`
+	Action          string  `json:"action"`
+	ConfidenceDelta float64 `json:"confidence_delta"`
+	VetoBuy         bool    `json:"veto_buy,omitempty"`
+	ForceSell       bool    `json:"force_sell,omitempty"`
+	Reason          string  `json:"reason"`
 }
 
 type Event map[string]any
@@ -879,6 +898,7 @@ func simulateBacktest(cfg Config, candlesBySymbol map[string][]Candle, from, to 
 	events := []Event{}
 	equityRows := []EquityRow{}
 	startIndex := maxInt(cfg.LookbackLimit, maxInt(cfg.Strategy.SlowSMA, cfg.Strategy.RSIPeriod+1))
+	startIndex = maxInt(startIndex, strategyWarmupLookback(cfg.Strategy))
 	startIndex = maxInt(startIndex, 25)
 
 	for i := startIndex; i < steps; i++ {
@@ -1295,6 +1315,15 @@ func shortDateTime(value string) string {
 }
 
 func buildSignal(symbol string, candles []Candle, cfg Config) Signal {
+	classic := buildClassicSignal(symbol, candles, cfg)
+	if !esotericStrategyEnabled(cfg.Strategy) {
+		return classic
+	}
+	modules := evaluateStrategyModules(symbol, candles, cfg, classic)
+	return combineStrategySignals(classic, modules, cfg.Strategy)
+}
+
+func buildClassicSignal(symbol string, candles []Candle, cfg Config) Signal {
 	closes := make([]float64, 0, len(candles))
 	for _, c := range candles {
 		closes = append(closes, c.Close)
@@ -1331,6 +1360,306 @@ func buildSignal(symbol string, candles []Candle, cfg Config) Signal {
 		Volatility: round6(vol),
 		Reason:     fmt.Sprintf("fast_sma=%.2f, slow_sma=%.2f, rsi=%.2f, vol=%.4f", fast, slow, currentRSI, vol),
 	}
+}
+
+func esotericStrategyEnabled(strategy Strategy) bool {
+	mode := strings.ToLower(strings.TrimSpace(strategy.Mode))
+	return mode == "ensemble" || mode == "parallel" || len(strategy.EnabledModules) > 0
+}
+
+func evaluateStrategyModules(symbol string, candles []Candle, cfg Config, classic Signal) []StrategyModuleResult {
+	enabled := enabledStrategyModules(cfg.Strategy)
+	results := make([]StrategyModuleResult, 0, len(enabled))
+	for _, module := range enabled {
+		switch module {
+		case "classic":
+			continue
+		case "chaos_gate":
+			results = append(results, chaosGateSignal(candles, cfg.Strategy, classic))
+		case "volume_echo":
+			results = append(results, volumeEchoSignal(candles, cfg.Strategy))
+		case "regime_oracle":
+			results = append(results, regimeOracleSignal(candles, cfg.Strategy, classic))
+		default:
+			results = append(results, StrategyModuleResult{
+				Name:   module,
+				Action: "hold",
+				Reason: "unknown strategy module",
+			})
+		}
+	}
+	return results
+}
+
+func enabledStrategyModules(strategy Strategy) []string {
+	if len(strategy.EnabledModules) == 0 {
+		return []string{"chaos_gate", "volume_echo", "regime_oracle"}
+	}
+	modules := make([]string, 0, len(strategy.EnabledModules))
+	seen := map[string]bool{}
+	for _, module := range strategy.EnabledModules {
+		key := strings.ToLower(strings.TrimSpace(module))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		modules = append(modules, key)
+	}
+	return modules
+}
+
+func combineStrategySignals(classic Signal, modules []StrategyModuleResult, strategy Strategy) Signal {
+	out := classic
+	out.StrategyMode = normalizedStrategyMode(strategy)
+	out.Modules = modules
+
+	confidence := classic.Confidence
+	buyVotes := 0
+	sellVotes := 0
+	if classic.Action == "buy" {
+		buyVotes++
+	}
+	if classic.Action == "sell" {
+		sellVotes++
+	}
+
+	vetoBuy := false
+	for _, module := range modules {
+		confidence += module.ConfidenceDelta
+		switch module.Action {
+		case "buy":
+			buyVotes++
+		case "sell":
+			sellVotes++
+		}
+		if module.VetoBuy {
+			vetoBuy = true
+		}
+		if module.ForceSell {
+			sellVotes += 2
+		}
+	}
+	out.Confidence = round4(clamp(confidence, 0, 1))
+
+	minVotes := strategy.EnsembleMinVotes
+	if minVotes <= 0 {
+		minVotes = 2
+	}
+	mode := normalizedStrategyMode(strategy)
+	switch {
+	case sellVotes >= minVotes:
+		out.Action = "sell"
+	case classic.Action == "buy" && !vetoBuy && buyVotes >= minVotes && out.Confidence >= strategy.MinConfidence:
+		out.Action = "buy"
+	case mode == "parallel" && !vetoBuy && buyVotes >= minVotes && out.Confidence >= strategy.MinConfidence:
+		out.Action = "buy"
+	case classic.Action == "sell":
+		out.Action = "sell"
+	default:
+		out.Action = "hold"
+	}
+
+	reasons := []string{classic.Reason}
+	for _, module := range modules {
+		reasons = append(reasons, fmt.Sprintf("%s: %s", module.Name, module.Reason))
+	}
+	out.Reason = strings.Join(reasons, " | ")
+	return out
+}
+
+func normalizedStrategyMode(strategy Strategy) string {
+	mode := strings.ToLower(strings.TrimSpace(strategy.Mode))
+	switch mode {
+	case "parallel":
+		return "parallel"
+	case "ensemble":
+		return "ensemble"
+	default:
+		if len(strategy.EnabledModules) > 0 {
+			return "ensemble"
+		}
+		return "classic"
+	}
+}
+
+func chaosGateSignal(candles []Candle, strategy Strategy, classic Signal) StrategyModuleResult {
+	period := strategy.ChaosPeriod
+	if period <= 0 {
+		period = 18
+	}
+	minEfficiency := strategy.ChaosMinEfficiency
+	if minEfficiency <= 0 {
+		minEfficiency = 0.28
+	}
+	closes := candleCloses(candles)
+	efficiency, ok := priceEfficiency(closes, period)
+	if !ok {
+		return StrategyModuleResult{Name: "chaos_gate", Action: "hold", Reason: "not enough history"}
+	}
+	result := StrategyModuleResult{
+		Name:   "chaos_gate",
+		Action: "hold",
+		Reason: fmt.Sprintf("efficiency=%.4f min=%.4f", efficiency, minEfficiency),
+	}
+	switch {
+	case efficiency < minEfficiency:
+		result.ConfidenceDelta = -0.18
+		result.VetoBuy = true
+	case efficiency > minEfficiency*1.9 && classic.FastSMA > classic.SlowSMA:
+		result.Action = "buy"
+		result.ConfidenceDelta = 0.08
+	case efficiency > minEfficiency*1.9 && classic.FastSMA < classic.SlowSMA:
+		result.Action = "sell"
+		result.ConfidenceDelta = 0.05
+	default:
+		result.ConfidenceDelta = -0.03
+	}
+	return result
+}
+
+func volumeEchoSignal(candles []Candle, strategy Strategy) StrategyModuleResult {
+	period := strategy.VolumePeriod
+	if period <= 0 {
+		period = 24
+	}
+	spikeMultiplier := strategy.VolumeSpikeMultiplier
+	if spikeMultiplier <= 0 {
+		spikeMultiplier = 1.6
+	}
+	if len(candles) <= period+1 {
+		return StrategyModuleResult{Name: "volume_echo", Action: "hold", Reason: "not enough history"}
+	}
+	recent := candles[len(candles)-period-1:]
+	avgVolume := 0.0
+	for _, candle := range recent[:len(recent)-1] {
+		avgVolume += candle.Volume
+	}
+	avgVolume /= float64(len(recent) - 1)
+	latest := recent[len(recent)-1]
+	previous := recent[len(recent)-2]
+	if avgVolume <= 0 || previous.Close <= 0 {
+		return StrategyModuleResult{Name: "volume_echo", Action: "hold", Reason: "volume baseline unavailable"}
+	}
+	ratio := latest.Volume / avgVolume
+	momentum := latest.Close/previous.Close - 1
+	result := StrategyModuleResult{
+		Name:   "volume_echo",
+		Action: "hold",
+		Reason: fmt.Sprintf("volume_ratio=%.4f momentum=%.4f", ratio, momentum),
+	}
+	switch {
+	case ratio >= spikeMultiplier && momentum > 0:
+		result.Action = "buy"
+		result.ConfidenceDelta = math.Min(0.14, 0.04+(ratio-spikeMultiplier)*0.04)
+	case ratio >= spikeMultiplier && momentum < 0:
+		result.Action = "sell"
+		result.ConfidenceDelta = math.Min(0.12, 0.04+(ratio-spikeMultiplier)*0.03)
+	case ratio < 0.55:
+		result.ConfidenceDelta = -0.06
+	default:
+		result.ConfidenceDelta = 0.01
+	}
+	return result
+}
+
+func regimeOracleSignal(candles []Candle, strategy Strategy, classic Signal) StrategyModuleResult {
+	period := strategy.RegimePeriod
+	if period <= 0 {
+		period = 48
+	}
+	closes := candleCloses(candles)
+	vol, okVol := realizedVolatility(closes, minInt(24, period))
+	efficiency, okEfficiency := priceEfficiency(closes, period)
+	if !okVol || !okEfficiency {
+		return StrategyModuleResult{Name: "regime_oracle", Action: "hold", Reason: "not enough history"}
+	}
+	result := StrategyModuleResult{
+		Name:   "regime_oracle",
+		Action: "hold",
+		Reason: fmt.Sprintf("regime=%s efficiency=%.4f vol=%.4f", marketRegime(efficiency, vol), efficiency, vol),
+	}
+	switch marketRegime(efficiency, vol) {
+	case "panic":
+		result.Action = "sell"
+		result.ConfidenceDelta = -0.12
+		result.ForceSell = classic.Action == "sell"
+		result.VetoBuy = true
+	case "trend":
+		if classic.FastSMA > classic.SlowSMA {
+			result.Action = "buy"
+			result.ConfidenceDelta = 0.09
+		} else {
+			result.Action = "sell"
+			result.ConfidenceDelta = 0.04
+		}
+	case "chop":
+		result.ConfidenceDelta = -0.11
+		result.VetoBuy = true
+	case "squeeze":
+		result.ConfidenceDelta = 0.03
+	default:
+		result.ConfidenceDelta = -0.01
+	}
+	return result
+}
+
+func marketRegime(efficiency, vol float64) string {
+	switch {
+	case vol >= 0.035 && efficiency < 0.35:
+		return "panic"
+	case efficiency >= 0.55:
+		return "trend"
+	case vol <= 0.006:
+		return "squeeze"
+	case efficiency < 0.22:
+		return "chop"
+	default:
+		return "mixed"
+	}
+}
+
+func candleCloses(candles []Candle) []float64 {
+	closes := make([]float64, 0, len(candles))
+	for _, candle := range candles {
+		closes = append(closes, candle.Close)
+	}
+	return closes
+}
+
+func priceEfficiency(values []float64, period int) (float64, bool) {
+	if len(values) <= period || period <= 1 {
+		return 0, false
+	}
+	recent := values[len(values)-period-1:]
+	net := math.Abs(recent[len(recent)-1] - recent[0])
+	path := 0.0
+	for i := 1; i < len(recent); i++ {
+		path += math.Abs(recent[i] - recent[i-1])
+	}
+	if path == 0 {
+		return 0, true
+	}
+	return clamp(net/path, 0, 1), true
+}
+
+func strategyWarmupLookback(strategy Strategy) int {
+	if !esotericStrategyEnabled(strategy) {
+		return 0
+	}
+	warmup := 0
+	if strategy.ChaosPeriod > warmup {
+		warmup = strategy.ChaosPeriod
+	}
+	if strategy.VolumePeriod+1 > warmup {
+		warmup = strategy.VolumePeriod + 1
+	}
+	if strategy.RegimePeriod > warmup {
+		warmup = strategy.RegimePeriod
+	}
+	if warmup == 0 {
+		warmup = 49
+	}
+	return warmup
 }
 
 func maybeExitPosition(state *State, cfg Config, signal Signal, journalPath string) (Event, error) {
@@ -2052,6 +2381,13 @@ func intervalDurationMillis(interval string) (int64, error) {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b

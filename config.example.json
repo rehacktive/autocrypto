@@ -21,12 +21,20 @@
     "take_profit_pct": 0.07
   },
   "strategy": {
+    "mode": "classic",
+    "enabled_modules": [],
+    "ensemble_min_votes": 2,
     "fast_sma": 12,
     "slow_sma": 48,
     "rsi_period": 14,
     "buy_rsi_max": 62,
     "sell_rsi_min": 74,
-    "min_confidence": 0.62
+    "min_confidence": 0.62,
+    "chaos_period": 18,
+    "chaos_min_efficiency": 0.28,
+    "volume_period": 24,
+    "volume_spike_multiplier": 1.6,
+    "regime_period": 48
   },
   "costs": {
     "fee_pct": 0.001,
