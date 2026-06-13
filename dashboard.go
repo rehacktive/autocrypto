@@ -125,6 +125,14 @@ func (app *DashboardApp) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if journal == nil {
 		journal = []Event{}
 	}
+	if report == nil {
+		snapshot, snapshotErr := app.readSnapshotReport(history)
+		if snapshotErr == nil {
+			report = snapshot
+		} else if lastError == "" {
+			lastError = snapshotErr.Error()
+		}
+	}
 	if lastError == "" {
 		if historyErr != nil && !errors.Is(historyErr, os.ErrNotExist) {
 			lastError = historyErr.Error()
@@ -145,6 +153,59 @@ func (app *DashboardApp) handleStatus(w http.ResponseWriter, r *http.Request) {
 		NextInterval: app.interval.String(),
 		CycleCount:   len(history),
 	})
+}
+
+func (app *DashboardApp) readSnapshotReport(history []EquityRow) (*Report, error) {
+	var cfg Config
+	if err := readJSON(app.configPath, &cfg); err != nil {
+		return nil, err
+	}
+
+	state := State{
+		Cash:      cfg.StartingBudget,
+		Positions: map[string]Position{},
+	}
+	statePath := filepath.Join(app.baseDir, "state.json")
+	if err := readJSON(statePath, &state); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if state.Positions == nil {
+		state.Positions = map[string]Position{}
+	}
+
+	reportTime := time.Now().UTC().Format(time.RFC3339)
+	cash := state.Cash
+	equity := state.LastEquity
+	realizedPnL := state.RealizedPnL
+	drawdownPct := 0.0
+	if state.HighWatermark > 0 && equity > 0 {
+		drawdownPct = round3((equity/state.HighWatermark - 1) * 100)
+	}
+
+	if len(history) > 0 {
+		latest := history[len(history)-1]
+		reportTime = latest.Time
+		cash = latest.Cash
+		equity = latest.Equity
+		realizedPnL = latest.RealizedPnL
+		drawdownPct = latest.DrawdownPct
+	} else if equity == 0 {
+		equity = cfg.StartingBudget
+	}
+
+	return &Report{
+		Time:        reportTime,
+		Mode:        cfg.Mode,
+		Cash:        round6(cash),
+		Equity:      round6(equity),
+		RealizedPnL: round6(realizedPnL),
+		DrawdownPct: drawdownPct,
+		Halted:      state.Halted,
+		HaltReason:  state.HaltReason,
+		Positions:   state.Positions,
+		Signals:     []Signal{},
+		Events:      []Event{},
+	}, nil
 }
 
 func (app *DashboardApp) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -286,7 +347,7 @@ const dashboardHTML = `<!doctype html>
       border-color: #63a5ff;
     }
     main {
-      max-width: 1280px;
+      max-width: 1480px;
       margin: 0 auto;
       padding: 20px;
     }
@@ -344,10 +405,17 @@ const dashboardHTML = `<!doctype html>
     .negative { color: var(--bad); }
     .grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.4fr) minmax(360px, 0.9fr);
+      grid-template-columns: repeat(12, minmax(0, 1fr));
       gap: 16px;
       align-items: start;
     }
+    .panel {
+      grid-column: span 6;
+      overflow: hidden;
+    }
+    .panel.wide { grid-column: span 8; }
+    .panel.narrow { grid-column: span 4; }
+    .panel.full { grid-column: 1 / -1; }
     .panel h2 {
       margin: 0;
       padding: 14px 16px;
@@ -364,6 +432,7 @@ const dashboardHTML = `<!doctype html>
       width: 100%;
       border-collapse: collapse;
       font-size: 13px;
+      table-layout: fixed;
     }
     th, td {
       padding: 10px 8px;
@@ -376,6 +445,7 @@ const dashboardHTML = `<!doctype html>
       font-size: 11px;
       text-transform: uppercase;
     }
+    tbody tr:hover { background: rgba(104, 167, 255, 0.04); }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -390,23 +460,98 @@ const dashboardHTML = `<!doctype html>
     }
     .pill.buy { background: rgba(73, 209, 141, 0.14); color: var(--good); }
     .pill.sell { background: rgba(255, 107, 107, 0.14); color: var(--bad); }
-    .module-list {
+    .signal-grid {
       display: grid;
-      gap: 5px;
-      min-width: 190px;
+      grid-template-columns: repeat(3, minmax(260px, 1fr));
+      gap: 12px;
     }
-    .module-row {
+    .signal-card {
+      background: linear-gradient(180deg, rgba(23, 31, 42, 0.92), rgba(18, 24, 33, 0.92));
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px;
+      min-height: 100%;
+    }
+    .signal-head {
       display: flex;
       align-items: flex-start;
-      gap: 6px;
-      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .asset {
+      font-size: 15px;
+      font-weight: 850;
+      letter-spacing: 0.02em;
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .stat {
+      background: rgba(11, 15, 20, 0.38);
+      border: 1px solid rgba(39, 50, 65, 0.72);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    .stat .label { font-size: 10px; }
+    .stat strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .strategy-box, .ai-box {
+      background: rgba(11, 15, 20, 0.28);
+      border: 1px solid rgba(39, 50, 65, 0.7);
+      border-radius: 8px;
+      padding: 10px;
+      margin-top: 8px;
+    }
+    .box-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      font-weight: 800;
+    }
+    .module-list {
+      display: grid;
+      gap: 8px;
+    }
+    .module-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding-top: 8px;
+      border-top: 1px solid rgba(39, 50, 65, 0.55);
+    }
+    .module-row:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+    .module-name {
+      font-weight: 800;
+      min-width: 0;
     }
     .module-reason {
-      flex-basis: 100%;
+      grid-column: 2 / 4;
       color: var(--muted);
       font-size: 12px;
       line-height: 1.35;
-      margin-left: 60px;
+    }
+    .reason-text {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      margin-top: 6px;
     }
     .errorbox {
       display: none;
@@ -422,12 +567,15 @@ const dashboardHTML = `<!doctype html>
       header { align-items: flex-start; flex-direction: column; }
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
+      .panel, .panel.wide, .panel.narrow, .panel.full { grid-column: 1; }
+      .signal-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 560px) {
       main { padding: 12px; }
       .metrics { grid-template-columns: 1fr; }
       .value { font-size: 22px; }
       th, td { padding: 9px 6px; }
+      .stat-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -454,17 +602,17 @@ const dashboardHTML = `<!doctype html>
       <div class="metric"><div class="label">Mode</div><div id="mode" class="value">-</div><div id="halt" class="sub"></div></div>
     </section>
     <section class="grid">
-      <div class="panel">
+      <div class="panel wide">
         <h2>Capital curve</h2>
         <div class="panel-body"><canvas id="equityChart" height="300"></canvas></div>
       </div>
-      <div class="panel">
+      <div class="panel narrow">
         <h2>Open positions</h2>
         <div class="panel-body"><table><thead><tr><th>Asset</th><th>Qty</th><th>Entry</th><th>Cost</th></tr></thead><tbody id="positions"></tbody></table></div>
       </div>
-      <div class="panel">
+      <div class="panel full">
         <h2>Signals</h2>
-        <div class="panel-body"><table><thead><tr><th>Asset</th><th>Action</th><th>Strategy</th><th>Price</th><th>Confidence</th><th>RSI</th><th>AI</th></tr></thead><tbody id="signals"></tbody></table></div>
+        <div class="panel-body"><div id="signals" class="signal-grid"></div></div>
       </div>
       <div class="panel">
         <h2>Journal</h2>
@@ -523,8 +671,16 @@ const dashboardHTML = `<!doctype html>
       runBtn.disabled = data.running;
       runBtn.textContent = data.running ? "Running..." : "Run now";
       if (data.last_error) renderError(data.last_error); else errorBox.style.display = "none";
-      if (!report) return;
+      if (!report) {
+        renderPositions({});
+        renderSignals([]);
+        renderJournal(data.journal || []);
+        renderDailyReport(data.daily_report);
+        drawChart(document.getElementById("equityChart"), data.history || []);
+        return;
+      }
 
+      const events = report.events || [];
       const start = firstEquity(data.history) || report.equity;
       const pnlPct = start ? ((report.equity / start - 1) * 100) : 0;
       setText("equity", fmtMoney.format(report.equity));
@@ -535,7 +691,7 @@ const dashboardHTML = `<!doctype html>
       document.getElementById("pnl").className = "value " + (report.equity >= start ? "positive" : "negative");
       setText("drawdown", report.drawdown_pct.toFixed(3) + "%");
       setText("cycles", String(data.cycle_count || (data.history || []).length));
-      setText("cycleSub", report.events.length ? (report.events.length + " event(s) in last cycle") : "last cycle completed");
+      setText("cycleSub", data.running && !events.length ? "showing saved state; cycle in progress" : (events.length ? (events.length + " event(s) in last cycle") : "last cycle completed"));
       setText("mode", report.mode);
       setText("halt", report.halted ? ("halted: " + (report.halt_reason || "risk limit")) : "paper trading active");
 
@@ -559,8 +715,8 @@ const dashboardHTML = `<!doctype html>
 
     function renderSignals(signals) {
       document.getElementById("signals").innerHTML = signals.map(s =>
-        "<tr><td>" + esc(s.symbol) + "</td><td><span class='pill " + esc(s.action) + "'>" + esc(s.action) + "</span>" + renderExecutionReason(s.execution_reason) + "</td><td>" + renderStrategy(s) + "</td><td>" + fmtMoney.format(s.price) + "</td><td>" + (s.confidence * 100).toFixed(1) + "%</td><td>" + (s.rsi || 0).toFixed(2) + "</td><td>" + renderAIReview(s.ai_review) + "</td></tr>"
-      ).join("") || "<tr><td colspan='7'>No signals yet</td></tr>";
+        "<article class='signal-card'><div class='signal-head'><div><div class='asset'>" + esc(s.symbol) + "</div>" + renderExecutionReason(s.execution_reason) + "</div><span class='pill " + esc(s.action) + "'>" + esc(s.action) + "</span></div><div class='stat-grid'><div class='stat'><div class='label'>Price</div><strong>" + fmtMoney.format(s.price) + "</strong></div><div class='stat'><div class='label'>Confidence</div><strong>" + (s.confidence * 100).toFixed(1) + "%</strong></div><div class='stat'><div class='label'>RSI</div><strong>" + (s.rsi || 0).toFixed(2) + "</strong></div></div>" + renderStrategy(s) + renderAIReview(s.ai_review) + "</article>"
+      ).join("") || "<div class='sub'>No signals yet</div>";
     }
 
     function renderExecutionReason(reason) {
@@ -568,26 +724,26 @@ const dashboardHTML = `<!doctype html>
     }
 
     function renderAIReview(review) {
-      if (!review) return "-";
+      if (!review) return "<section class='ai-box'><div class='box-title'><span>AI</span><span>-</span></div></section>";
       const label = review.approved ? "ok" : "blocked";
-      return "<span class='pill " + (review.approved ? "" : "sell") + "'>" + label + "</span><div class='sub'>" + esc(review.reason || "") + "</div>";
+      return "<section class='ai-box'><div class='box-title'><span>AI review</span><span class='pill " + (review.approved ? "" : "sell") + "'>" + label + "</span></div><div class='reason-text'>" + esc(review.reason || "") + "</div></section>";
     }
 
     function renderStrategy(signal) {
       const mode = signal.strategy_mode || "classic";
       const modules = signal.strategy_modules || [];
-      let html = "<span class='pill'>" + esc(mode) + "</span>";
+      let html = "<section class='strategy-box'><div class='box-title'><span>Strategy</span><span class='pill'>" + esc(mode) + "</span></div>";
       if (!modules.length) {
-        return html + "<div class='sub'>" + esc(signal.reason || "") + "</div>";
+        return html + "<div class='reason-text'>" + esc(signal.reason || "") + "</div></section>";
       }
       html += "<div class='module-list'>";
       for (const module of modules) {
         const action = module.action || "hold";
-        const delta = module.confidence_delta ? " " + signedPct(module.confidence_delta * 100) : "";
+        const delta = module.confidence_delta ? signedPct(module.confidence_delta * 100) : "";
         const flags = (module.veto_buy ? " veto" : "") + (module.force_sell ? " force sell" : "");
-        html += "<div class='module-row'><span class='pill " + esc(action) + "'>" + esc(action) + "</span><strong>" + esc(module.name || "module") + "</strong><span class='sub'>" + esc(delta + flags) + "</span><div class='module-reason'>" + esc(module.reason || "") + "</div></div>";
+        html += "<div class='module-row'><span class='pill " + esc(action) + "'>" + esc(action) + "</span><span class='module-name'>" + esc(module.name || "module") + "</span><span class='sub'>" + esc([delta, flags.trim()].filter(Boolean).join(" · ")) + "</span><div class='module-reason'>" + esc(module.reason || "") + "</div></div>";
       }
-      html += "</div>";
+      html += "</div></section>";
       return html;
     }
 

@@ -1020,6 +1020,42 @@ func TestWriteDailyReportPersistsJSON(t *testing.T) {
 	}
 }
 
+func TestDashboardSnapshotReportUsesSavedHistory(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	cfg := testConfig()
+	cfg.Mode = "paper"
+	cfg.StartingBudget = 1000
+	if err := writeJSON(configPath, cfg); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := writeJSON(filepath.Join(dir, "state.json"), State{
+		Cash:          970,
+		Positions:     map[string]Position{"BTCUSDT": {EntryPrice: 100, Qty: 1, Cost: 100}},
+		RealizedPnL:   -5,
+		LastEquity:    995,
+		HighWatermark: 1005,
+	}); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	history := []EquityRow{
+		{Time: "2026-06-13T10:00:00Z", Cash: 980, Equity: 1002, RealizedPnL: 2, DrawdownPct: -0.1},
+		{Time: "2026-06-13T11:00:00Z", Cash: 970, Equity: 995, RealizedPnL: -5, DrawdownPct: -0.995},
+	}
+
+	app := DashboardApp{configPath: configPath, baseDir: dir}
+	report, err := app.readSnapshotReport(history)
+	if err != nil {
+		t.Fatalf("readSnapshotReport returned error: %v", err)
+	}
+	if report.Time != history[1].Time || report.Cash != 970 || report.Equity != 995 || report.DrawdownPct != -0.995 {
+		t.Fatalf("expected latest history row in snapshot, got %#v", report)
+	}
+	if report.Mode != "paper" || len(report.Positions) != 1 || len(report.Signals) != 0 || len(report.Events) != 0 {
+		t.Fatalf("unexpected snapshot report: %#v", report)
+	}
+}
+
 func TestMustFloatStringParsesAndPanicsOnInvalidType(t *testing.T) {
 	if got := mustFloatString("12.34"); got != 12.34 {
 		t.Fatalf("expected 12.34, got %v", got)
