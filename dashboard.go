@@ -416,6 +416,12 @@ const dashboardHTML = `<!doctype html>
     .panel.wide { grid-column: span 8; }
     .panel.narrow { grid-column: span 4; }
     .panel.full { grid-column: 1 / -1; }
+    .side-stack {
+      grid-column: span 4;
+      display: grid;
+      gap: 16px;
+    }
+    .side-stack .panel { grid-column: 1; }
     .panel h2 {
       margin: 0;
       padding: 14px 16px;
@@ -553,6 +559,17 @@ const dashboardHTML = `<!doctype html>
       line-height: 1.35;
       margin-top: 6px;
     }
+    .reason-text.clamped {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      cursor: help;
+    }
+    .reason-text.clamped:hover {
+      -webkit-line-clamp: unset;
+      overflow: visible;
+    }
     .errorbox {
       display: none;
       margin-bottom: 16px;
@@ -568,6 +585,7 @@ const dashboardHTML = `<!doctype html>
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
       .panel, .panel.wide, .panel.narrow, .panel.full { grid-column: 1; }
+      .side-stack { grid-column: 1; }
       .signal-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 560px) {
@@ -606,24 +624,26 @@ const dashboardHTML = `<!doctype html>
         <h2>Capital curve</h2>
         <div class="panel-body"><canvas id="equityChart" height="300"></canvas></div>
       </div>
-      <div class="panel narrow">
-        <h2>Open positions</h2>
-        <div class="panel-body"><table><thead><tr><th>Asset</th><th>Qty</th><th>Entry</th><th>Cost</th></tr></thead><tbody id="positions"></tbody></table></div>
-      </div>
-      <div class="panel full">
+      <aside class="side-stack">
+        <div class="panel">
+          <h2>Open positions</h2>
+          <div class="panel-body"><table><thead><tr><th>Asset</th><th>Qty</th><th>Entry</th><th>Cost</th></tr></thead><tbody id="positions"></tbody></table></div>
+        </div>
+        <div class="panel">
+          <h2>Journal</h2>
+          <div class="panel-body"><table><thead><tr><th>Time</th><th>Type</th><th>Asset</th><th>Reason</th></tr></thead><tbody id="journal"></tbody></table></div>
+        </div>
+        <div class="panel">
+          <h2>Daily report</h2>
+          <div class="panel-body">
+            <table><thead><tr><th>Date</th><th>Performance</th><th>Drawdown</th><th>PnL</th><th>Trades</th></tr></thead><tbody id="dailyReport"></tbody></table>
+            <table><thead><tr><th>Time</th><th>Asset</th><th>PnL</th><th>Reason</th></tr></thead><tbody id="worstTrades"></tbody></table>
+          </div>
+        </div>
+      </aside>
+      <div class="panel wide">
         <h2>Signals</h2>
         <div class="panel-body"><div id="signals" class="signal-grid"></div></div>
-      </div>
-      <div class="panel">
-        <h2>Journal</h2>
-        <div class="panel-body"><table><thead><tr><th>Time</th><th>Type</th><th>Asset</th><th>Reason</th></tr></thead><tbody id="journal"></tbody></table></div>
-      </div>
-      <div class="panel">
-        <h2>Daily report</h2>
-        <div class="panel-body">
-          <table><thead><tr><th>Date</th><th>Performance</th><th>Drawdown</th><th>PnL</th><th>Trades</th></tr></thead><tbody id="dailyReport"></tbody></table>
-          <table><thead><tr><th>Time</th><th>Asset</th><th>PnL</th><th>Reason</th></tr></thead><tbody id="worstTrades"></tbody></table>
-        </div>
       </div>
     </section>
   </main>
@@ -726,7 +746,8 @@ const dashboardHTML = `<!doctype html>
     function renderAIReview(review) {
       if (!review) return "<section class='ai-box'><div class='box-title'><span>AI</span><span>-</span></div></section>";
       const label = review.approved ? "ok" : "blocked";
-      return "<section class='ai-box'><div class='box-title'><span>AI review</span><span class='pill " + (review.approved ? "" : "sell") + "'>" + label + "</span></div><div class='reason-text'>" + esc(review.reason || "") + "</div></section>";
+      const reason = review.reason || "";
+      return "<section class='ai-box'><div class='box-title'><span>AI review</span><span class='pill " + (review.approved ? "" : "sell") + "'>" + label + "</span></div><div class='reason-text clamped' title='" + escAttr(reason) + "'>" + esc(reason) + "</div></section>";
     }
 
     function renderStrategy(signal) {
@@ -819,6 +840,9 @@ const dashboardHTML = `<!doctype html>
     function shortTime(value) { return value ? new Date(value).toLocaleString() : ""; }
     function esc(value) {
       return String(value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c]));
+    }
+    function escAttr(value) {
+      return esc(value).replace(/\n/g, " ");
     }
 
     loadStatus();
