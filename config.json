@@ -9,7 +9,7 @@
     "provider": "binance"
   },
   "ai": {
-    "enabled": false,
+    "enabled": true,
     "require_approval_for_buys": false,
     "provider": "local",
     "model": "nvidia/nemotron-3-nano-4b"

@@ -1745,7 +1745,7 @@ func maybeExitPositionAt(state *State, cfg Config, signal Signal, journalPath, e
 		exitReason = "stop_loss"
 	case changePct >= cfg.Risk.TakeProfitPct:
 		exitReason = "take_profit"
-	case signal.Action == "sell" && !aiRejected(signal):
+	case signal.Action == "sell" && !shouldBlockAIRejection(cfg, signal):
 		exitReason = "strategy_sell"
 	default:
 		return nil, nil
@@ -1791,7 +1791,7 @@ func maybeEnterPositionAt(state *State, cfg Config, signal *Signal, journalPath,
 	}
 
 	ensureSignalAIReview(cfg, signal, *state)
-	if signal.AIReview != nil && !signal.AIReview.Approved {
+	if shouldBlockAIRejection(cfg, *signal) {
 		event := Event{
 			"time":   eventTime,
 			"type":   "blocked_buy",
@@ -1876,8 +1876,16 @@ func ensureSignalAIReview(cfg Config, signal *Signal, state State) {
 	signal.AIReview = &review
 }
 
-func aiRejected(signal Signal) bool {
-	return signal.AIReview != nil && !signal.AIReview.Approved
+func shouldBlockAIRejection(cfg Config, signal Signal) bool {
+	if signal.AIReview == nil || signal.AIReview.Approved {
+		return false
+	}
+	switch signal.Action {
+	case "buy", "sell":
+		return cfg.AI.RequireApprovalForBuys
+	default:
+		return false
+	}
 }
 
 func executionPrice(price float64, side string, costs Costs) float64 {
@@ -1925,14 +1933,14 @@ func localAIReview(model string, payload map[string]any) (AIReview, error) {
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a conservative market trading signal reviewer. Return only JSON with keys approved, confidence, reason. Explain the quantitative signal briefly. Interpret approved as whether the proposed action is reasonable, not whether a trade should be opened. For action=hold, low confidence, neutral RSI, weak trend, or lack of directional edge usually support the hold and should be approved; reject hold only if the metrics contradict holding. For action=buy or action=sell, reject if the signal is incoherent, low quality, or risk is excessive. You must not invent new trades.",
+				"content": "You are a balanced paper-trading signal reviewer. Return only JSON with keys approved, confidence, reason. Explain the quantitative signal briefly. Interpret approved as whether the proposed action is reasonable enough for paper trading under the configured risk limits, not as a prediction guarantee. Approve imperfect but coherent buy or sell signals when trend, momentum, regime, or module votes provide a plausible edge and position risk is within limits. Reject only when the signal is internally inconsistent, clearly low quality, or violates risk constraints. For action=hold, approve unless the metrics strongly contradict holding. You must not invent new trades.",
 			},
 			{
 				"role":    "user",
 				"content": "Payload: " + string(payloadBytes),
 			},
 		},
-		"temperature": 0,
+		"temperature": 0.2,
 		"response_format": map[string]any{
 			"type": "json_schema",
 			"json_schema": map[string]any{

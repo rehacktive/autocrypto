@@ -661,6 +661,35 @@ func TestMaybeEnterPositionBlocksRejectedAISignal(t *testing.T) {
 	}
 }
 
+func TestMaybeEnterPositionAllowsRejectedAIWhenApprovalNotRequired(t *testing.T) {
+	cfg := testConfig()
+	cfg.AI.Enabled = true
+	cfg.AI.RequireApprovalForBuys = false
+	state := State{
+		Cash:            1000,
+		Positions:       map[string]Position{},
+		TradeCountByDay: map[string]int{},
+	}
+	signal := Signal{
+		Symbol:     "BTCUSDT",
+		Action:     "buy",
+		Price:      100,
+		Confidence: 0.8,
+		AIReview:   &AIReview{Approved: false, Confidence: 0.2, Reason: "weak setup"},
+	}
+
+	event, err := maybeEnterPosition(&state, cfg, &signal, filepath.Join(t.TempDir(), "journal.jsonl"))
+	if err != nil {
+		t.Fatalf("maybeEnterPosition returned error: %v", err)
+	}
+	if event == nil || event["type"] != "buy" {
+		t.Fatalf("expected advisory AI rejection to allow buy, got %#v", event)
+	}
+	if _, exists := state.Positions["BTCUSDT"]; !exists {
+		t.Fatal("expected advisory AI rejection to still open a position")
+	}
+}
+
 func TestMaybeExitPositionAppliesTakeProfit(t *testing.T) {
 	cfg := testConfig()
 	state := State{

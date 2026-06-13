@@ -109,7 +109,7 @@ Nel file `config.json` puoi abilitare:
 ```json
 "ai": {
   "enabled": true,
-  "require_approval_for_buys": true,
+  "require_approval_for_buys": false,
   "provider": "local",
   "model": "nvidia/nemotron-3-nano-4b"
 }
@@ -117,7 +117,7 @@ Nel file `config.json` puoi abilitare:
 
 Il bot chiama un server locale compatibile OpenAI su `http://127.0.0.1:1234/v1/chat/completions`.
 
-Il revisore AI non genera trade da solo: riceve ogni segnale quantitativo e puo spiegarlo, approvarlo o bocciarlo. Se boccia un buy, il bot non compra; se boccia un sell strategico, il bot evita quell'uscita. Stop loss e take profit restano sempre prioritari. Se `require_approval_for_buys` e attivo e l'AI non risponde su un buy, il bot non compra.
+Il revisore AI non genera trade da solo: riceve ogni segnale quantitativo e puo spiegarlo, approvarlo o segnalarlo come debole. Con `require_approval_for_buys: false` il reviewer e consultivo: il suo giudizio resta nel segnale e nel journal, ma non blocca un buy paper generato dalla strategia quantitativa. Con `require_approval_for_buys: true` diventa un gate rigido: se boccia un buy, il bot non compra; se l'AI non risponde su un buy, il bot non compra. Stop loss e take profit restano sempre prioritari.
 
 ## Strategie esoteriche opzionali
 
