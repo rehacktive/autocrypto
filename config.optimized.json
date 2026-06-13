@@ -28,7 +28,7 @@
     "fast_sma": 8,
     "slow_sma": 32,
     "rsi_period": 14,
-    "buy_rsi_max": 45,
+    "buy_rsi_max": 52,
     "sell_rsi_min": 74,
     "min_confidence": 0.58
   },

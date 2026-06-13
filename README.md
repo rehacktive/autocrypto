@@ -1,4 +1,4 @@
-# Crypto AI Paper Bot
+# AutoCrypto / AI Paper Bot
 
 Un bot prudente per sperimentare trading crypto automatico in modalita paper trading.
 
@@ -131,6 +131,12 @@ Per generare un file di configurazione pronto da provare, aggiungi `--optimized-
 
 ```bash
 go run . --config config.json --backtest --backtest-no-ai --backtest-format report --optimize 300 --optimized-config config.optimized.json --from 2026-01-01 --to 2026-03-31
+```
+
+Per ridurre il rischio di overfitting puoi fare una validazione walk-forward: il bot ottimizza sul periodo `--from/--to`, poi testa ogni candidato su `--validate-from/--validate-to` e preferisce configurazioni che restano qualificate anche fuori campione.
+
+```bash
+go run . --config config.json --backtest --backtest-no-ai --backtest-format report --optimize 300 --optimized-config config.optimized.json --from 2026-01-01 --to 2026-03-31 --validate-from 2026-04-01 --validate-to 2026-05-31
 ```
 
 ## Perche questa forma

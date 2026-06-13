@@ -195,6 +195,8 @@ type BreakdownRow struct {
 type OptimizationReport struct {
 	From                string               `json:"from"`
 	To                  string               `json:"to"`
+	ValidateFrom        string               `json:"validate_from,omitempty"`
+	ValidateTo          string               `json:"validate_to,omitempty"`
 	Runs                int                  `json:"runs"`
 	OptimizedConfigPath string               `json:"optimized_config_path,omitempty"`
 	Baseline            OptimizationResult   `json:"baseline"`
@@ -202,25 +204,27 @@ type OptimizationReport struct {
 }
 
 type OptimizationResult struct {
-	Rank           int     `json:"rank"`
-	Score          float64 `json:"score"`
-	Qualified      bool    `json:"qualified"`
-	Quality        string  `json:"quality"`
-	PerformancePct float64 `json:"performance_pct"`
-	BenchmarkPct   float64 `json:"benchmark_pct"`
-	AlphaPct       float64 `json:"alpha_pct"`
-	MaxDrawdownPct float64 `json:"max_drawdown_pct"`
-	ClosedTrades   int     `json:"closed_trades"`
-	WinRatePct     float64 `json:"win_rate_pct"`
-	ProfitFactor   float64 `json:"profit_factor"`
-	FastSMA        int     `json:"fast_sma"`
-	SlowSMA        int     `json:"slow_sma"`
-	BuyRSIMax      float64 `json:"buy_rsi_max"`
-	SellRSIMin     float64 `json:"sell_rsi_min"`
-	MinConfidence  float64 `json:"min_confidence"`
-	StopLossPct    float64 `json:"stop_loss_pct"`
-	TakeProfitPct  float64 `json:"take_profit_pct"`
-	MaxPositionPct float64 `json:"max_position_pct"`
+	Rank             int                 `json:"rank"`
+	Score            float64             `json:"score"`
+	WalkForwardScore float64             `json:"walk_forward_score,omitempty"`
+	Qualified        bool                `json:"qualified"`
+	Quality          string              `json:"quality"`
+	PerformancePct   float64             `json:"performance_pct"`
+	BenchmarkPct     float64             `json:"benchmark_pct"`
+	AlphaPct         float64             `json:"alpha_pct"`
+	MaxDrawdownPct   float64             `json:"max_drawdown_pct"`
+	ClosedTrades     int                 `json:"closed_trades"`
+	WinRatePct       float64             `json:"win_rate_pct"`
+	ProfitFactor     float64             `json:"profit_factor"`
+	FastSMA          int                 `json:"fast_sma"`
+	SlowSMA          int                 `json:"slow_sma"`
+	BuyRSIMax        float64             `json:"buy_rsi_max"`
+	SellRSIMin       float64             `json:"sell_rsi_min"`
+	MinConfidence    float64             `json:"min_confidence"`
+	StopLossPct      float64             `json:"stop_loss_pct"`
+	TakeProfitPct    float64             `json:"take_profit_pct"`
+	MaxPositionPct   float64             `json:"max_position_pct"`
+	Validation       *OptimizationResult `json:"validation,omitempty"`
 }
 
 type BacktestStats struct {
@@ -257,6 +261,8 @@ func main() {
 	optimizedConfig := flag.String("optimized-config", "", "write the best optimization risk/strategy to this config file")
 	from := flag.String("from", "", "backtest start date in YYYY-MM-DD format")
 	to := flag.String("to", "", "backtest end date in YYYY-MM-DD format")
+	validateFrom := flag.String("validate-from", "", "walk-forward validation start date in YYYY-MM-DD format")
+	validateTo := flag.String("validate-to", "", "walk-forward validation end date in YYYY-MM-DD format")
 	addr := flag.String("addr", "127.0.0.1:8787", "web dashboard address")
 	sleep := flag.Duration("sleep", 5*time.Minute, "sleep duration between loop cycles")
 	flag.Parse()
@@ -270,7 +276,7 @@ func main() {
 
 	if *backtest {
 		if *optimize > 0 {
-			report, err := runBacktestOptimization(*configPath, *from, *to, *backtestNoAI, *optimize)
+			report, err := runBacktestOptimization(*configPath, *from, *to, *validateFrom, *validateTo, *backtestNoAI, *optimize)
 			if err != nil {
 				exitErr(err.Error())
 			}
@@ -543,9 +549,12 @@ func runBacktest(configPath, from, to string, disableAI bool) (BacktestReport, e
 	return simulateBacktest(cfg, candlesBySymbol, from, to, maxSteps), nil
 }
 
-func runBacktestOptimization(configPath, from, to string, disableAI bool, runs int) (OptimizationReport, error) {
+func runBacktestOptimization(configPath, from, to, validateFrom, validateTo string, disableAI bool, runs int) (OptimizationReport, error) {
 	if from == "" || to == "" {
 		return OptimizationReport{}, errors.New("optimization requires --from and --to in YYYY-MM-DD format")
+	}
+	if (validateFrom == "") != (validateTo == "") {
+		return OptimizationReport{}, errors.New("walk-forward validation requires both --validate-from and --validate-to")
 	}
 	var cfg Config
 	if err := readJSON(configPath, &cfg); err != nil {
@@ -561,22 +570,42 @@ func runBacktestOptimization(configPath, from, to string, disableAI bool, runs i
 	if err != nil {
 		return OptimizationReport{}, err
 	}
+	var validationCandlesBySymbol map[string][]Candle
+	validationSteps := 0
+	if validateFrom != "" {
+		validationCandlesBySymbol, validationSteps, err = loadHistoricalCandles(cfg, validateFrom, validateTo)
+		if err != nil {
+			return OptimizationReport{}, err
+		}
+	}
 
 	baselineReport := simulateBacktest(cfg, candlesBySymbol, from, to, maxSteps)
 	minTrades := minOptimizationTrades(maxSteps, cfg.Interval)
 	baseline := optimizationResultWithQuality(0, cfg, baselineReport, minTrades)
+	if validateFrom != "" {
+		validationReport := simulateBacktest(cfg, validationCandlesBySymbol, validateFrom, validateTo, validationSteps)
+		validationMinTrades := minOptimizationTrades(validationSteps, cfg.Interval)
+		validation := optimizationResultWithQuality(0, cfg, validationReport, validationMinTrades)
+		baseline.Validation = &validation
+		baseline.WalkForwardScore = walkForwardScore(baseline)
+	}
 	candidates := generateOptimizationConfigs(cfg, runs)
 	results := make([]OptimizationResult, 0, len(candidates))
 	for _, candidate := range candidates {
 		candidate.AI.Enabled = false
 		report := simulateBacktest(candidate, candlesBySymbol, from, to, maxSteps)
-		results = append(results, optimizationResultWithQuality(0, candidate, report, minTrades))
+		result := optimizationResultWithQuality(0, candidate, report, minTrades)
+		if validateFrom != "" {
+			validationReport := simulateBacktest(candidate, validationCandlesBySymbol, validateFrom, validateTo, validationSteps)
+			validationMinTrades := minOptimizationTrades(validationSteps, cfg.Interval)
+			validation := optimizationResultWithQuality(0, candidate, validationReport, validationMinTrades)
+			result.Validation = &validation
+			result.WalkForwardScore = walkForwardScore(result)
+		}
+		results = append(results, result)
 	}
 	sort.Slice(results, func(i, j int) bool {
-		if results[i].Qualified != results[j].Qualified {
-			return results[i].Qualified
-		}
-		return results[i].Score > results[j].Score
+		return betterOptimizationResult(results[i], results[j])
 	})
 	if len(results) > 10 {
 		results = results[:10]
@@ -586,11 +615,13 @@ func runBacktestOptimization(configPath, from, to string, disableAI bool, runs i
 	}
 
 	return OptimizationReport{
-		From:     from,
-		To:       to,
-		Runs:     len(candidates),
-		Baseline: baseline,
-		Best:     results,
+		From:         from,
+		To:           to,
+		ValidateFrom: validateFrom,
+		ValidateTo:   validateTo,
+		Runs:         len(candidates),
+		Baseline:     baseline,
+		Best:         results,
 	}, nil
 }
 
@@ -608,7 +639,7 @@ func writeOptimizedConfig(configPath, outputPath string, report OptimizationRepo
 
 func recommendedOptimizationResult(results []OptimizationResult) (OptimizationResult, bool) {
 	for _, result := range results {
-		if result.Qualified {
+		if result.Qualified && (result.Validation == nil || result.Validation.Qualified) {
 			return result, true
 		}
 	}
@@ -616,6 +647,40 @@ func recommendedOptimizationResult(results []OptimizationResult) (OptimizationRe
 		return OptimizationResult{}, false
 	}
 	return results[0], true
+}
+
+func betterOptimizationResult(left, right OptimizationResult) bool {
+	if left.Validation != nil || right.Validation != nil {
+		leftValidated := left.Validation != nil && left.Validation.Qualified
+		rightValidated := right.Validation != nil && right.Validation.Qualified
+		if leftValidated != rightValidated {
+			return leftValidated
+		}
+		if left.Qualified != right.Qualified {
+			return left.Qualified
+		}
+		if left.WalkForwardScore != right.WalkForwardScore {
+			return left.WalkForwardScore > right.WalkForwardScore
+		}
+	}
+	if left.Qualified != right.Qualified {
+		return left.Qualified
+	}
+	return left.Score > right.Score
+}
+
+func walkForwardScore(result OptimizationResult) float64 {
+	if result.Validation == nil {
+		return result.Score
+	}
+	score := result.Score*0.35 + result.Validation.Score*0.65
+	if !result.Qualified {
+		score -= 10
+	}
+	if !result.Validation.Qualified {
+		score -= 25
+	}
+	return round4(score)
 }
 
 func applyOptimizationResult(cfg Config, result OptimizationResult) Config {
@@ -985,7 +1050,11 @@ func formatOptimizationReport(report OptimizationReport) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Backtest optimization\n")
 	fmt.Fprintf(&b, "=====================\n")
-	fmt.Fprintf(&b, "Periodo: %s -> %s | Simulazioni: %d\n\n", report.From, report.To, report.Runs)
+	fmt.Fprintf(&b, "Training: %s -> %s | Simulazioni: %d\n", report.From, report.To, report.Runs)
+	if report.ValidateFrom != "" {
+		fmt.Fprintf(&b, "Validation: %s -> %s\n", report.ValidateFrom, report.ValidateTo)
+	}
+	fmt.Fprintf(&b, "\n")
 	if report.OptimizedConfigPath != "" {
 		fmt.Fprintf(&b, "Config ottimizzato: %s\n\n", report.OptimizedConfigPath)
 	}
@@ -1003,11 +1072,19 @@ func writeOptimizationResult(b *strings.Builder, result OptimizationResult) {
 	if result.Rank > 0 {
 		rank = fmt.Sprintf("#%d ", result.Rank)
 	}
-	fmt.Fprintf(b, "- %sscore %.4f | perf %+.3f%% | bench %+.3f%% | alpha %+.3f%% | dd %.3f%% | trades %d | win %.2f%% | pf %s\n",
-		rank, result.Score, result.PerformancePct, result.BenchmarkPct, result.AlphaPct, result.MaxDrawdownPct, result.ClosedTrades, result.WinRatePct, formatProfitFactor(result.ProfitFactor))
+	scoreLabel := fmt.Sprintf("score %.4f", result.Score)
+	if result.Validation != nil {
+		scoreLabel = fmt.Sprintf("wf_score %.4f | train_score %.4f", result.WalkForwardScore, result.Score)
+	}
+	fmt.Fprintf(b, "- %s%s | perf %+.3f%% | bench %+.3f%% | alpha %+.3f%% | dd %.3f%% | trades %d | win %.2f%% | pf %s\n",
+		rank, scoreLabel, result.PerformancePct, result.BenchmarkPct, result.AlphaPct, result.MaxDrawdownPct, result.ClosedTrades, result.WinRatePct, formatProfitFactor(result.ProfitFactor))
 	fmt.Fprintf(b, "  quality=%s\n", result.Quality)
 	fmt.Fprintf(b, "  fast=%d slow=%d buy_rsi=%.2f sell_rsi=%.2f min_conf=%.2f stop=%.3f take=%.3f max_pos=%.2f\n",
 		result.FastSMA, result.SlowSMA, result.BuyRSIMax, result.SellRSIMin, result.MinConfidence, result.StopLossPct, result.TakeProfitPct, result.MaxPositionPct)
+	if result.Validation != nil {
+		fmt.Fprintf(b, "  validation: score %.4f | perf %+.3f%% | alpha %+.3f%% | dd %.3f%% | trades %d | win %.2f%% | pf %s | %s\n",
+			result.Validation.Score, result.Validation.PerformancePct, result.Validation.AlphaPct, result.Validation.MaxDrawdownPct, result.Validation.ClosedTrades, result.Validation.WinRatePct, formatProfitFactor(result.Validation.ProfitFactor), result.Validation.Quality)
+	}
 }
 
 func writeBreakdownRows(b *strings.Builder, rows map[string]BreakdownRow) {

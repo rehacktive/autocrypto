@@ -287,6 +287,31 @@ func TestOptimizationRanksCandidates(t *testing.T) {
 	}
 }
 
+func TestOptimizationSortPrefersValidationQuality(t *testing.T) {
+	trainHeroValidationBad := OptimizationResult{
+		Rank:             1,
+		Score:            100,
+		Qualified:        true,
+		WalkForwardScore: 15,
+		Validation:       &OptimizationResult{Score: -10, Qualified: false, Quality: "rejected"},
+	}
+	steadyValidated := OptimizationResult{
+		Rank:             2,
+		Score:            20,
+		Qualified:        true,
+		WalkForwardScore: 25,
+		Validation:       &OptimizationResult{Score: 30, Qualified: true, Quality: "qualified"},
+	}
+
+	results := []OptimizationResult{trainHeroValidationBad, steadyValidated}
+	sort.Slice(results, func(i, j int) bool {
+		return betterOptimizationResult(results[i], results[j])
+	})
+	if results[0].Rank != steadyValidated.Rank {
+		t.Fatalf("expected validated candidate to rank first, got rank %d", results[0].Rank)
+	}
+}
+
 func TestOptimizationRejectsInactiveLowQualityResult(t *testing.T) {
 	cfg := testConfig()
 	report := BacktestReport{
@@ -322,6 +347,27 @@ func TestRecommendedOptimizationResultPrefersQualified(t *testing.T) {
 	}
 	if got.Rank != qualified.Rank {
 		t.Fatalf("expected qualified result to be preferred, got rank %d", got.Rank)
+	}
+}
+
+func TestRecommendedOptimizationResultPrefersWalkForwardQualified(t *testing.T) {
+	trainOnly := OptimizationResult{
+		Rank:       1,
+		Qualified:  true,
+		Validation: &OptimizationResult{Qualified: false, Quality: "rejected"},
+	}
+	walkForward := OptimizationResult{
+		Rank:       2,
+		Qualified:  true,
+		Validation: &OptimizationResult{Qualified: true, Quality: "qualified"},
+	}
+
+	got, ok := recommendedOptimizationResult([]OptimizationResult{trainOnly, walkForward})
+	if !ok {
+		t.Fatal("expected recommended result")
+	}
+	if got.Rank != walkForward.Rank {
+		t.Fatalf("expected walk-forward qualified result, got rank %d", got.Rank)
 	}
 }
 
