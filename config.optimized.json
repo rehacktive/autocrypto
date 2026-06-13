@@ -1,8 +1,12 @@
 {
   "mode": "paper",
   "quote_asset": "USDT",
-  "starting_budget": 1000.0,
-  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  "starting_budget": 1000,
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT"
+  ],
   "interval": "1h",
   "lookback_limit": 180,
   "ai": {
