@@ -233,6 +233,29 @@ func TestFetchHistoricalKlinesUsesDateRange(t *testing.T) {
 	}
 }
 
+func TestNewMarketDataProviderDefaultsToBinance(t *testing.T) {
+	provider, err := newMarketDataProvider(Config{})
+	if err != nil {
+		t.Fatalf("newMarketDataProvider returned error: %v", err)
+	}
+	binance, ok := provider.(BinanceMarketDataProvider)
+	if !ok {
+		t.Fatalf("expected BinanceMarketDataProvider, got %T", provider)
+	}
+	if binance.baseURL() != defaultBinanceAPI {
+		t.Fatalf("unexpected default base URL %q", binance.baseURL())
+	}
+}
+
+func TestNewMarketDataProviderRejectsUnknownProvider(t *testing.T) {
+	_, err := newMarketDataProvider(Config{
+		MarketData: MarketDataConfig{Provider: "alpaca"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported market_data.provider") {
+		t.Fatalf("expected unsupported provider error, got %v", err)
+	}
+}
+
 func TestParseBacktestRangeIncludesToDateOnly(t *testing.T) {
 	start, end, err := parseBacktestRange("2026-06-01", "2026-06-03")
 	if err != nil {
@@ -1070,6 +1093,10 @@ func TestMustFloatStringParsesAndPanicsOnInvalidType(t *testing.T) {
 }
 
 func TestLocalAIReviewWithLocalModel(t *testing.T) {
+	if os.Getenv("AUTOCRYPTO_RUN_LOCAL_AI_TESTS") != "1" {
+		t.Skip("set AUTOCRYPTO_RUN_LOCAL_AI_TESTS=1 to run the local AI integration test")
+	}
+
 	previousClient := http.DefaultClient
 	t.Cleanup(func() {
 		http.DefaultClient = previousClient

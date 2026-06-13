@@ -1,8 +1,8 @@
 # AutoCrypto / AI Paper Bot
 
-Un bot prudente per sperimentare trading crypto automatico in modalita paper trading.
+Un bot prudente per sperimentare trading automatico in modalita paper trading. Oggi include un provider dati Binance per crypto spot, ma il motore e pensato per essere esteso ad altri mercati tramite adapter.
 
-Questa versione e scritta in Go e non invia ordini reali. Scarica candele pubbliche da Binance, genera segnali con una strategia semplice, applica limiti di rischio rigidi e salva un diario locale.
+Questa versione e scritta in Go e non invia ordini reali. Scarica candele pubbliche dal provider configurato, genera segnali con una strategia semplice, applica limiti di rischio rigidi e salva un diario locale.
 
 ## Avvio rapido
 
@@ -57,10 +57,10 @@ go run . --config config.json --backtest --backtest-no-ai --backtest-format repo
 
 - Usa un budget iniziale configurabile.
 - Opera solo in paper trading.
-- Tiene posizioni virtuali su BTC, ETH e SOL.
+- Tiene posizioni virtuali sui simboli configurati.
 - Applica stop loss, take profit, limite di perdita giornaliera, limite di perdita totale, massimo trade al giorno.
 - Puo usare un revisore AI opzionale che spiega o boccia i segnali.
-- Puo fare backtest su candele storiche Binance per valutare periodi estesi.
+- Puo fare backtest su candele storiche del provider configurato per valutare periodi estesi.
 - Confronta il backtest con benchmark buy-and-hold equal-weight.
 - Include fee e slippage configurabili.
 - Salva stato e diario in `state.json` e `journal.jsonl`.
@@ -89,6 +89,18 @@ Puoi cambiare indirizzo e frequenza della simulazione:
 ```bash
 ./autocrypto --config config.json --serve --addr 127.0.0.1:8787 --sleep 5m
 ```
+
+## Provider dati di mercato
+
+Il config supporta una sezione `market_data`. Se manca, il default resta Binance per compatibilita con i config esistenti.
+
+```json
+"market_data": {
+  "provider": "binance"
+}
+```
+
+Questo e il primo strato di astrazione per rendere il bot una piattaforma generica: strategia, rischio, paper trading, dashboard e backtest dipendono da un provider dati, non da Binance direttamente. Per aggiungere azioni, ETF, forex o altri strumenti, il prossimo passo e implementare un nuovo provider con lo stesso contratto.
 
 ## Revisore AI opzionale
 
@@ -134,7 +146,7 @@ La strategia classica resta il default. Per provare moduli aggiuntivi senza camb
 
 ## Backtest storico
 
-La modalita backtest scarica candele storiche da Binance per i simboli configurati e simula il periodo in memoria, senza modificare `state.json` o `journal.jsonl`.
+La modalita backtest scarica candele storiche dal provider configurato per i simboli scelti e simula il periodo in memoria, senza modificare `state.json` o `journal.jsonl`.
 
 ```bash
 go run . --config config.json --backtest --from 2026-01-01 --to 2026-03-31
@@ -172,4 +184,5 @@ L'obiettivo e capire se una strategia ha un edge prima di rischiare capitale ver
 
 1. Confrontare backtest su periodi diversi.
 2. Far girare paper trading per 2-4 settimane.
-3. Solo dopo, valutare integrazione exchange con API key senza permesso di withdrawal.
+3. Aggiungere un secondo provider dati non-crypto, per esempio azioni/ETF in paper trading.
+4. Solo dopo, valutare integrazione broker/exchange con API key senza permesso di withdrawal.

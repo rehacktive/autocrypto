@@ -17,22 +17,28 @@ import (
 )
 
 const (
-	binanceAPI = "https://api.binance.com"
-	localAIAPI = "http://127.0.0.1:1234/v1/chat/completions"
-	userAgent  = "crypto-ai-paper-bot-go/0.1"
+	defaultBinanceAPI = "https://api.binance.com"
+	localAIAPI        = "http://127.0.0.1:1234/v1/chat/completions"
+	userAgent         = "auto-trading-paper-bot-go/0.1"
 )
 
 type Config struct {
-	Mode           string   `json:"mode"`
-	QuoteAsset     string   `json:"quote_asset"`
-	StartingBudget float64  `json:"starting_budget"`
-	Symbols        []string `json:"symbols"`
-	Interval       string   `json:"interval"`
-	LookbackLimit  int      `json:"lookback_limit"`
-	AI             AIConfig `json:"ai"`
-	Risk           Risk     `json:"risk"`
-	Strategy       Strategy `json:"strategy"`
-	Costs          Costs    `json:"costs"`
+	Mode           string           `json:"mode"`
+	QuoteAsset     string           `json:"quote_asset"`
+	StartingBudget float64          `json:"starting_budget"`
+	Symbols        []string         `json:"symbols"`
+	Interval       string           `json:"interval"`
+	LookbackLimit  int              `json:"lookback_limit"`
+	MarketData     MarketDataConfig `json:"market_data"`
+	AI             AIConfig         `json:"ai"`
+	Risk           Risk             `json:"risk"`
+	Strategy       Strategy         `json:"strategy"`
+	Costs          Costs            `json:"costs"`
+}
+
+type MarketDataConfig struct {
+	Provider string `json:"provider"`
+	BaseURL  string `json:"base_url,omitempty"`
 }
 
 type AIConfig struct {
@@ -268,6 +274,16 @@ type BacktestStats struct {
 	TotalBlockedBuys int
 }
 
+type MarketDataProvider interface {
+	FetchCandles(symbol, interval string, limit int) ([]Candle, error)
+	FetchHistoricalCandles(symbol, interval string, start, end time.Time) ([]Candle, error)
+}
+
+type BinanceMarketDataProvider struct {
+	BaseURL string
+	Client  *http.Client
+}
+
 func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	once := flag.Bool("once", false, "run a single cycle")
@@ -373,12 +389,17 @@ func runCycle(configPath string) (Report, error) {
 		return Report{}, err
 	}
 
+	marketData, err := newMarketDataProvider(cfg)
+	if err != nil {
+		return Report{}, err
+	}
+
 	latestPrices := map[string]float64{}
 	signals := make([]Signal, 0, len(cfg.Symbols))
 	events := []Event{}
 
 	for _, symbol := range cfg.Symbols {
-		candles, err := fetchKlines(symbol, cfg.Interval, cfg.LookbackLimit)
+		candles, err := marketData.FetchCandles(symbol, cfg.Interval, cfg.LookbackLimit)
 		if err != nil {
 			return Report{}, fmt.Errorf("fetch %s: %w", symbol, err)
 		}
@@ -455,14 +476,44 @@ func runCycle(configPath string) (Report, error) {
 	return report, nil
 }
 
-func fetchKlines(symbol, interval string, limit int) ([]Candle, error) {
-	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=%s&limit=%d", binanceAPI, symbol, interval, limit)
+func newMarketDataProvider(cfg Config) (MarketDataProvider, error) {
+	provider := strings.ToLower(strings.TrimSpace(cfg.MarketData.Provider))
+	if provider == "" {
+		provider = "binance"
+	}
+	switch provider {
+	case "binance":
+		return BinanceMarketDataProvider{
+			BaseURL: cfg.MarketData.BaseURL,
+			Client:  http.DefaultClient,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported market_data.provider %q", cfg.MarketData.Provider)
+	}
+}
+
+func (p BinanceMarketDataProvider) baseURL() string {
+	if strings.TrimSpace(p.BaseURL) == "" {
+		return defaultBinanceAPI
+	}
+	return strings.TrimRight(p.BaseURL, "/")
+}
+
+func (p BinanceMarketDataProvider) client() *http.Client {
+	if p.Client != nil {
+		return p.Client
+	}
+	return http.DefaultClient
+}
+
+func (p BinanceMarketDataProvider) FetchCandles(symbol, interval string, limit int) ([]Candle, error) {
+	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=%s&limit=%d", p.baseURL(), symbol, interval, limit)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.client().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +530,7 @@ func fetchKlines(symbol, interval string, limit int) ([]Candle, error) {
 	return parseKlineRows(raw), nil
 }
 
-func fetchHistoricalKlines(symbol, interval string, start, end time.Time) ([]Candle, error) {
+func (p BinanceMarketDataProvider) FetchHistoricalCandles(symbol, interval string, start, end time.Time) ([]Candle, error) {
 	intervalMs, err := intervalDurationMillis(interval)
 	if err != nil {
 		return nil, err
@@ -488,13 +539,13 @@ func fetchHistoricalKlines(symbol, interval string, start, end time.Time) ([]Can
 	startMs := start.UTC().UnixMilli()
 	endMs := end.UTC().UnixMilli()
 	for startMs < endMs {
-		url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=%s&startTime=%d&endTime=%d&limit=1000", binanceAPI, symbol, interval, startMs, endMs)
+		url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=%s&startTime=%d&endTime=%d&limit=1000", p.baseURL(), symbol, interval, startMs, endMs)
 		req, err := http.NewRequest(http.MethodGet, url, nil)
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("User-Agent", userAgent)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := p.client().Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -526,6 +577,14 @@ func fetchHistoricalKlines(symbol, interval string, start, end time.Time) ([]Can
 		startMs = nextStart
 	}
 	return candles, nil
+}
+
+func fetchKlines(symbol, interval string, limit int) ([]Candle, error) {
+	return BinanceMarketDataProvider{Client: http.DefaultClient}.FetchCandles(symbol, interval, limit)
+}
+
+func fetchHistoricalKlines(symbol, interval string, start, end time.Time) ([]Candle, error) {
+	return BinanceMarketDataProvider{Client: http.DefaultClient}.FetchHistoricalCandles(symbol, interval, start, end)
 }
 
 func parseKlineRows(raw [][]any) []Candle {
@@ -859,6 +918,14 @@ func minOptimizationTrades(steps int, interval string) int {
 }
 
 func loadHistoricalCandles(cfg Config, from, to string) (map[string][]Candle, int, error) {
+	marketData, err := newMarketDataProvider(cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	return loadHistoricalCandlesWithProvider(cfg, marketData, from, to)
+}
+
+func loadHistoricalCandlesWithProvider(cfg Config, marketData MarketDataProvider, from, to string) (map[string][]Candle, int, error) {
 	start, end, err := parseBacktestRange(from, to)
 	if err != nil {
 		return nil, 0, err
@@ -867,7 +934,7 @@ func loadHistoricalCandles(cfg Config, from, to string) (map[string][]Candle, in
 	candlesBySymbol := map[string][]Candle{}
 	maxSteps := 0
 	for _, symbol := range cfg.Symbols {
-		candles, err := fetchHistoricalKlines(symbol, cfg.Interval, start, end)
+		candles, err := marketData.FetchHistoricalCandles(symbol, cfg.Interval, start, end)
 		if err != nil {
 			return nil, 0, fmt.Errorf("fetch historical %s: %w", symbol, err)
 		}
@@ -1858,7 +1925,7 @@ func localAIReview(model string, payload map[string]any) (AIReview, error) {
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a conservative crypto trading signal reviewer. Return only JSON with keys approved, confidence, reason. Explain the quantitative signal briefly. Interpret approved as whether the proposed action is reasonable, not whether a trade should be opened. For action=hold, low confidence, neutral RSI, weak trend, or lack of directional edge usually support the hold and should be approved; reject hold only if the metrics contradict holding. For action=buy or action=sell, reject if the signal is incoherent, low quality, or risk is excessive. You must not invent new trades.",
+				"content": "You are a conservative market trading signal reviewer. Return only JSON with keys approved, confidence, reason. Explain the quantitative signal briefly. Interpret approved as whether the proposed action is reasonable, not whether a trade should be opened. For action=hold, low confidence, neutral RSI, weak trend, or lack of directional edge usually support the hold and should be approved; reject hold only if the metrics contradict holding. For action=buy or action=sell, reject if the signal is incoherent, low quality, or risk is excessive. You must not invent new trades.",
 			},
 			{
 				"role":    "user",

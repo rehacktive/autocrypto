@@ -5,6 +5,9 @@
   "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
   "interval": "1h",
   "lookback_limit": 180,
+  "market_data": {
+    "provider": "binance"
+  },
   "ai": {
     "enabled": true,
     "require_approval_for_buys": true,
