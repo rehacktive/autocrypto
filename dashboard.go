@@ -390,6 +390,24 @@ const dashboardHTML = `<!doctype html>
     }
     .pill.buy { background: rgba(73, 209, 141, 0.14); color: var(--good); }
     .pill.sell { background: rgba(255, 107, 107, 0.14); color: var(--bad); }
+    .module-list {
+      display: grid;
+      gap: 5px;
+      min-width: 190px;
+    }
+    .module-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .module-reason {
+      flex-basis: 100%;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      margin-left: 60px;
+    }
     .errorbox {
       display: none;
       margin-bottom: 16px;
@@ -446,7 +464,7 @@ const dashboardHTML = `<!doctype html>
       </div>
       <div class="panel">
         <h2>Signals</h2>
-        <div class="panel-body"><table><thead><tr><th>Asset</th><th>Action</th><th>Price</th><th>Confidence</th><th>RSI</th><th>AI</th></tr></thead><tbody id="signals"></tbody></table></div>
+        <div class="panel-body"><table><thead><tr><th>Asset</th><th>Action</th><th>Strategy</th><th>Price</th><th>Confidence</th><th>RSI</th><th>AI</th></tr></thead><tbody id="signals"></tbody></table></div>
       </div>
       <div class="panel">
         <h2>Journal</h2>
@@ -541,8 +559,8 @@ const dashboardHTML = `<!doctype html>
 
     function renderSignals(signals) {
       document.getElementById("signals").innerHTML = signals.map(s =>
-        "<tr><td>" + esc(s.symbol) + "</td><td><span class='pill " + esc(s.action) + "'>" + esc(s.action) + "</span>" + renderExecutionReason(s.execution_reason) + "</td><td>" + fmtMoney.format(s.price) + "</td><td>" + (s.confidence * 100).toFixed(1) + "%</td><td>" + (s.rsi || 0).toFixed(2) + "</td><td>" + renderAIReview(s.ai_review) + "</td></tr>"
-      ).join("") || "<tr><td colspan='6'>No signals yet</td></tr>";
+        "<tr><td>" + esc(s.symbol) + "</td><td><span class='pill " + esc(s.action) + "'>" + esc(s.action) + "</span>" + renderExecutionReason(s.execution_reason) + "</td><td>" + renderStrategy(s) + "</td><td>" + fmtMoney.format(s.price) + "</td><td>" + (s.confidence * 100).toFixed(1) + "%</td><td>" + (s.rsi || 0).toFixed(2) + "</td><td>" + renderAIReview(s.ai_review) + "</td></tr>"
+      ).join("") || "<tr><td colspan='7'>No signals yet</td></tr>";
     }
 
     function renderExecutionReason(reason) {
@@ -553,6 +571,24 @@ const dashboardHTML = `<!doctype html>
       if (!review) return "-";
       const label = review.approved ? "ok" : "blocked";
       return "<span class='pill " + (review.approved ? "" : "sell") + "'>" + label + "</span><div class='sub'>" + esc(review.reason || "") + "</div>";
+    }
+
+    function renderStrategy(signal) {
+      const mode = signal.strategy_mode || "classic";
+      const modules = signal.strategy_modules || [];
+      let html = "<span class='pill'>" + esc(mode) + "</span>";
+      if (!modules.length) {
+        return html + "<div class='sub'>" + esc(signal.reason || "") + "</div>";
+      }
+      html += "<div class='module-list'>";
+      for (const module of modules) {
+        const action = module.action || "hold";
+        const delta = module.confidence_delta ? " " + signedPct(module.confidence_delta * 100) : "";
+        const flags = (module.veto_buy ? " veto" : "") + (module.force_sell ? " force sell" : "");
+        html += "<div class='module-row'><span class='pill " + esc(action) + "'>" + esc(action) + "</span><strong>" + esc(module.name || "module") + "</strong><span class='sub'>" + esc(delta + flags) + "</span><div class='module-reason'>" + esc(module.reason || "") + "</div></div>";
+      }
+      html += "</div>";
+      return html;
     }
 
     function renderJournal(journal) {
