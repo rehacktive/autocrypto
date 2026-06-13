@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -249,6 +250,147 @@ func TestFormatBacktestReportIncludesUsefulSummary(t *testing.T) {
 	}
 }
 
+func TestOptimizationRanksCandidates(t *testing.T) {
+	cfg := testConfig()
+	cfg.Symbols = []string{"BTCUSDT"}
+	cfg.LookbackLimit = 26
+	cfg.AI.Enabled = false
+	candlesBySymbol := map[string][]Candle{
+		"BTCUSDT": historicalCandles(100, 48),
+	}
+
+	candidates := generateOptimizationConfigs(cfg, 5)
+	if len(candidates) != 5 {
+		t.Fatalf("expected 5 candidates, got %d", len(candidates))
+	}
+
+	results := make([]OptimizationResult, 0, len(candidates))
+	for _, candidate := range candidates {
+		report := simulateBacktest(candidate, candlesBySymbol, "2026-06-12", "2026-06-13", len(candlesBySymbol["BTCUSDT"]))
+		results = append(results, optimizationResult(0, candidate, report))
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	if len(results) == 0 {
+		t.Fatal("expected optimization results")
+	}
+	text := formatOptimizationReport(OptimizationReport{
+		From:     "2026-06-12",
+		To:       "2026-06-13",
+		Runs:     len(results),
+		Baseline: results[0],
+		Best:     results[:1],
+	})
+	if !strings.Contains(text, "Backtest optimization") || !strings.Contains(text, "Migliori configurazioni") {
+		t.Fatalf("unexpected optimization report:\n%s", text)
+	}
+}
+
+func TestOptimizationRejectsInactiveLowQualityResult(t *testing.T) {
+	cfg := testConfig()
+	report := BacktestReport{
+		PerformancePct: -0.5,
+		BenchmarkPct:   -30,
+		AlphaPct:       29.5,
+		MaxDrawdownPct: -0.5,
+		Events: []Event{
+			{"type": "sell", "symbol": "BTCUSDT", "pnl": -1.0, "reason": "strategy_sell", "time": "2026-01-02T10:00:00Z"},
+			{"type": "sell", "symbol": "ETHUSDT", "pnl": -2.0, "reason": "strategy_sell", "time": "2026-01-03T10:00:00Z"},
+		},
+	}
+
+	result := optimizationResultWithQuality(0, cfg, report, 20)
+	if result.Qualified {
+		t.Fatalf("expected low-sample losing result to be rejected: %#v", result)
+	}
+	if !strings.Contains(result.Quality, "low sample") || !strings.Contains(result.Quality, "profit factor") {
+		t.Fatalf("expected quality reason to explain rejection, got %q", result.Quality)
+	}
+	if result.Score > 0 {
+		t.Fatalf("expected penalties to push score below zero, got %v", result.Score)
+	}
+}
+
+func TestRecommendedOptimizationResultPrefersQualified(t *testing.T) {
+	rejected := OptimizationResult{Rank: 1, Score: 100, Qualified: false, Quality: "rejected"}
+	qualified := OptimizationResult{Rank: 2, Score: 10, Qualified: true, Quality: "ok"}
+
+	got, ok := recommendedOptimizationResult([]OptimizationResult{rejected, qualified})
+	if !ok {
+		t.Fatal("expected recommended result")
+	}
+	if got.Rank != qualified.Rank {
+		t.Fatalf("expected qualified result to be preferred, got rank %d", got.Rank)
+	}
+}
+
+func TestApplyOptimizationResultUpdatesRiskAndStrategyOnly(t *testing.T) {
+	cfg := testConfig()
+	cfg.Symbols = []string{"BTCUSDT", "ETHUSDT"}
+	cfg.Costs = Costs{FeePct: 0.001, SlippagePct: 0.0005}
+	cfg.AI.Enabled = true
+	result := OptimizationResult{
+		FastSMA:        8,
+		SlowSMA:        32,
+		BuyRSIMax:      45,
+		SellRSIMin:     68,
+		MinConfidence:  0.7,
+		StopLossPct:    0.05,
+		TakeProfitPct:  0.1,
+		MaxPositionPct: 0.1,
+	}
+
+	optimized := applyOptimizationResult(cfg, result)
+	if optimized.Strategy.FastSMA != 8 || optimized.Strategy.SlowSMA != 32 || optimized.Strategy.BuyRSIMax != 45 || optimized.Strategy.SellRSIMin != 68 || optimized.Strategy.MinConfidence != 0.7 {
+		t.Fatalf("strategy was not updated from optimization result: %#v", optimized.Strategy)
+	}
+	if optimized.Risk.StopLossPct != 0.05 || optimized.Risk.TakeProfitPct != 0.1 || optimized.Risk.MaxPositionPct != 0.1 {
+		t.Fatalf("risk was not updated from optimization result: %#v", optimized.Risk)
+	}
+	if optimized.Strategy.RSIPeriod != cfg.Strategy.RSIPeriod || optimized.Risk.MaxTradeRiskPct != cfg.Risk.MaxTradeRiskPct || !optimized.AI.Enabled || optimized.Costs != cfg.Costs || len(optimized.Symbols) != len(cfg.Symbols) {
+		t.Fatalf("unexpected non-optimized fields changed: %#v", optimized)
+	}
+}
+
+func TestWriteOptimizedConfig(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "config.json")
+	outputPath := filepath.Join(dir, "config.optimized.json")
+	cfg := testConfig()
+	cfg.AI.Enabled = true
+	if err := writeJSON(inputPath, cfg); err != nil {
+		t.Fatalf("write input config: %v", err)
+	}
+	report := OptimizationReport{
+		Best: []OptimizationResult{{
+			Qualified:      true,
+			FastSMA:        8,
+			SlowSMA:        32,
+			BuyRSIMax:      45,
+			SellRSIMin:     68,
+			MinConfidence:  0.7,
+			StopLossPct:    0.05,
+			TakeProfitPct:  0.1,
+			MaxPositionPct: 0.1,
+		}},
+	}
+
+	if err := writeOptimizedConfig(inputPath, outputPath, report); err != nil {
+		t.Fatalf("write optimized config: %v", err)
+	}
+	var optimized Config
+	if err := readJSON(outputPath, &optimized); err != nil {
+		t.Fatalf("read optimized config: %v", err)
+	}
+	if optimized.Strategy.FastSMA != 8 || optimized.Risk.MaxPositionPct != 0.1 {
+		t.Fatalf("optimized config did not contain selected parameters: %#v", optimized)
+	}
+	if !optimized.AI.Enabled {
+		t.Fatalf("expected non-risk/strategy settings to be preserved")
+	}
+}
+
 func historicalCandles(startPrice float64, count int) []Candle {
 	candles := make([]Candle, 0, count)
 	start := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
@@ -300,6 +442,40 @@ func TestMaybeEnterPositionBuysWithinRiskLimits(t *testing.T) {
 	}
 	if info, err := os.Stat(journalPath); err != nil || info.Size() == 0 {
 		t.Fatalf("expected journal entry, info=%#v err=%v", info, err)
+	}
+}
+
+func TestTradeCostsApplyFeeAndSlippage(t *testing.T) {
+	cfg := testConfig()
+	cfg.Costs = Costs{FeePct: 0.001, SlippagePct: 0.01}
+	state := State{
+		Cash:            1000,
+		Positions:       map[string]Position{},
+		TradeCountByDay: map[string]int{},
+	}
+	signal := Signal{Symbol: "BTCUSDT", Action: "buy", Price: 100, Confidence: 0.8}
+
+	event, err := maybeEnterPositionAt(&state, cfg, &signal, "", "2026-06-12T10:00:00Z")
+	if err != nil {
+		t.Fatalf("maybeEnterPositionAt returned error: %v", err)
+	}
+	if event == nil || eventFloat(event, "price") != 101 {
+		t.Fatalf("expected slippage-adjusted buy event, got %#v", event)
+	}
+	if state.Cash != 749.75 {
+		t.Fatalf("expected cash 749.75 after fee, got %v", state.Cash)
+	}
+
+	exit := Signal{Symbol: "BTCUSDT", Action: "sell", Price: 100}
+	event, err = maybeExitPositionAt(&state, cfg, exit, "", "2026-06-12T11:00:00Z")
+	if err != nil {
+		t.Fatalf("maybeExitPositionAt returned error: %v", err)
+	}
+	if event == nil || eventFloat(event, "price") != 99 {
+		t.Fatalf("expected slippage-adjusted sell event, got %#v", event)
+	}
+	if eventFloat(event, "pnl") >= 0 {
+		t.Fatalf("expected costs to make this round trip negative, got %#v", event)
 	}
 }
 
@@ -433,6 +609,30 @@ func TestMaybeExitPositionRiskExitIgnoresRejectedAI(t *testing.T) {
 	}
 	if event == nil || event["reason"] != "stop_loss" {
 		t.Fatalf("expected stop-loss exit despite rejected AI review, got %#v", event)
+	}
+}
+
+func TestAnnotateSignalExecutionReasonsForIgnoredSell(t *testing.T) {
+	signals := []Signal{
+		{Symbol: "BTCUSDT", Action: "sell"},
+		{Symbol: "ETHUSDT", Action: "sell"},
+		{Symbol: "SOLUSDT", Action: "hold"},
+	}
+	state := State{
+		Positions: map[string]Position{
+			"ETHUSDT": {EntryPrice: 100, Qty: 1, Cost: 100},
+		},
+	}
+
+	annotateSignalExecutionReasons(signals, state)
+	if signals[0].ExecutionReason != "sell signal ignored: no open position" {
+		t.Fatalf("expected ignored sell reason, got %q", signals[0].ExecutionReason)
+	}
+	if signals[1].ExecutionReason != "" {
+		t.Fatalf("did not expect reason for sell with open position, got %q", signals[1].ExecutionReason)
+	}
+	if signals[2].ExecutionReason != "" {
+		t.Fatalf("did not expect reason for hold, got %q", signals[2].ExecutionReason)
 	}
 }
 

@@ -47,6 +47,12 @@ Per un report leggibile invece del JSON:
 go run . --config config.json --backtest --backtest-no-ai --backtest-format report --from 2026-01-01 --to 2026-03-31
 ```
 
+Per cercare parametri migliori sullo stesso periodo:
+
+```bash
+go run . --config config.json --backtest --backtest-no-ai --backtest-format report --optimize 300 --from 2026-01-01 --to 2026-03-31
+```
+
 ## Cosa fa
 
 - Usa un budget iniziale configurabile.
@@ -55,6 +61,8 @@ go run . --config config.json --backtest --backtest-no-ai --backtest-format repo
 - Applica stop loss, take profit, limite di perdita giornaliera, limite di perdita totale, massimo trade al giorno.
 - Puo usare un revisore AI opzionale che spiega o boccia i segnali.
 - Puo fare backtest su candele storiche Binance per valutare periodi estesi.
+- Confronta il backtest con benchmark buy-and-hold equal-weight.
+- Include fee e slippage configurabili.
 - Salva stato e diario in `state.json` e `journal.jsonl`.
 - Salva la curva capitale in `equity.jsonl`.
 - Salva il report giornaliero in `daily_report.json`.
@@ -107,7 +115,23 @@ La modalita backtest scarica candele storiche da Binance per i simboli configura
 go run . --config config.json --backtest --from 2026-01-01 --to 2026-03-31
 ```
 
-Il risultato JSON include equity finale, performance, max drawdown, eventi, posizioni aperte e report giornalieri. Se vuoi una sintesi leggibile con win rate, profit factor, giorni migliori/peggiori e peggiori trade, usa `--backtest-format report`. Se `ai.enabled` e attivo, anche il backtest chiamera il revisore AI per ogni segnale, quindi per test lunghi conviene usare `--backtest-no-ai`.
+Il risultato JSON include equity finale, performance, max drawdown, benchmark, alpha, breakdown per simbolo/motivo uscita, eventi, posizioni aperte e report giornalieri. Se vuoi una sintesi leggibile con win rate, profit factor, giorni migliori/peggiori e peggiori trade, usa `--backtest-format report`. Se `ai.enabled` e attivo, anche il backtest chiamera il revisore AI per ogni segnale, quindi per test lunghi conviene usare `--backtest-no-ai`.
+
+### Ottimizzazione
+
+Puoi eseguire N simulazioni sullo stesso periodo variando parametri di strategia e rischio:
+
+```bash
+go run . --config config.json --backtest --backtest-no-ai --backtest-format report --optimize 300 --from 2026-01-01 --to 2026-03-31
+```
+
+Lo score premia performance, alpha rispetto al benchmark, profit factor e win rate, penalizzando drawdown, pochi trade e risultati con qualita statistica debole. Le configurazioni con pochi trade, profit factor sotto 1 o win rate molto basso vengono marcate come `rejected`. Non e una garanzia: serve per trovare candidati da verificare su periodi diversi, non per scegliere automaticamente una strategia definitiva.
+
+Per generare un file di configurazione pronto da provare, aggiungi `--optimized-config`. Il file mantiene la configurazione originale e aggiorna solo le sezioni `risk` e `strategy` con la migliore configurazione qualificata; se nessuna configurazione e qualificata, usa comunque la migliore disponibile.
+
+```bash
+go run . --config config.json --backtest --backtest-no-ai --backtest-format report --optimize 300 --optimized-config config.optimized.json --from 2026-01-01 --to 2026-03-31
+```
 
 ## Perche questa forma
 

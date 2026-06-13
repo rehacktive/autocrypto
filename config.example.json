@@ -27,5 +27,9 @@
     "buy_rsi_max": 62,
     "sell_rsi_min": 74,
     "min_confidence": 0.62
+  },
+  "costs": {
+    "fee_pct": 0.001,
+    "slippage_pct": 0.0005
   }
 }

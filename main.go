@@ -32,6 +32,7 @@ type Config struct {
 	AI             AIConfig `json:"ai"`
 	Risk           Risk     `json:"risk"`
 	Strategy       Strategy `json:"strategy"`
+	Costs          Costs    `json:"costs"`
 }
 
 type AIConfig struct {
@@ -58,6 +59,11 @@ type Strategy struct {
 	BuyRSIMax     float64 `json:"buy_rsi_max"`
 	SellRSIMin    float64 `json:"sell_rsi_min"`
 	MinConfidence float64 `json:"min_confidence"`
+}
+
+type Costs struct {
+	FeePct      float64 `json:"fee_pct"`
+	SlippagePct float64 `json:"slippage_pct"`
 }
 
 type Position struct {
@@ -91,16 +97,17 @@ type Candle struct {
 }
 
 type Signal struct {
-	Symbol     string    `json:"symbol"`
-	Action     string    `json:"action"`
-	Confidence float64   `json:"confidence"`
-	Price      float64   `json:"price"`
-	FastSMA    float64   `json:"fast_sma,omitempty"`
-	SlowSMA    float64   `json:"slow_sma,omitempty"`
-	RSI        float64   `json:"rsi,omitempty"`
-	Volatility float64   `json:"volatility,omitempty"`
-	Reason     string    `json:"reason"`
-	AIReview   *AIReview `json:"ai_review,omitempty"`
+	Symbol          string    `json:"symbol"`
+	Action          string    `json:"action"`
+	Confidence      float64   `json:"confidence"`
+	Price           float64   `json:"price"`
+	FastSMA         float64   `json:"fast_sma,omitempty"`
+	SlowSMA         float64   `json:"slow_sma,omitempty"`
+	RSI             float64   `json:"rsi,omitempty"`
+	Volatility      float64   `json:"volatility,omitempty"`
+	Reason          string    `json:"reason"`
+	ExecutionReason string    `json:"execution_reason,omitempty"`
+	AIReview        *AIReview `json:"ai_review,omitempty"`
 }
 
 type AIReview struct {
@@ -155,10 +162,65 @@ type BacktestReport struct {
 	Equity         float64             `json:"equity"`
 	RealizedPnL    float64             `json:"realized_pnl"`
 	PerformancePct float64             `json:"performance_pct"`
+	BenchmarkPct   float64             `json:"benchmark_pct"`
+	AlphaPct       float64             `json:"alpha_pct"`
 	MaxDrawdownPct float64             `json:"max_drawdown_pct"`
 	Positions      map[string]Position `json:"positions"`
 	Events         []Event             `json:"events"`
 	DailyReports   []DailyReport       `json:"daily_reports"`
+	Breakdown      TradeBreakdown      `json:"breakdown"`
+	Benchmarks     []Benchmark         `json:"benchmarks"`
+	Costs          Costs               `json:"costs"`
+}
+
+type Benchmark struct {
+	Symbol         string  `json:"symbol"`
+	StartPrice     float64 `json:"start_price"`
+	EndPrice       float64 `json:"end_price"`
+	PerformancePct float64 `json:"performance_pct"`
+}
+
+type TradeBreakdown struct {
+	BySymbol map[string]BreakdownRow `json:"by_symbol"`
+	ByReason map[string]BreakdownRow `json:"by_reason"`
+}
+
+type BreakdownRow struct {
+	Trades      int     `json:"trades"`
+	Wins        int     `json:"wins"`
+	Losses      int     `json:"losses"`
+	RealizedPnL float64 `json:"realized_pnl"`
+}
+
+type OptimizationReport struct {
+	From                string               `json:"from"`
+	To                  string               `json:"to"`
+	Runs                int                  `json:"runs"`
+	OptimizedConfigPath string               `json:"optimized_config_path,omitempty"`
+	Baseline            OptimizationResult   `json:"baseline"`
+	Best                []OptimizationResult `json:"best"`
+}
+
+type OptimizationResult struct {
+	Rank           int     `json:"rank"`
+	Score          float64 `json:"score"`
+	Qualified      bool    `json:"qualified"`
+	Quality        string  `json:"quality"`
+	PerformancePct float64 `json:"performance_pct"`
+	BenchmarkPct   float64 `json:"benchmark_pct"`
+	AlphaPct       float64 `json:"alpha_pct"`
+	MaxDrawdownPct float64 `json:"max_drawdown_pct"`
+	ClosedTrades   int     `json:"closed_trades"`
+	WinRatePct     float64 `json:"win_rate_pct"`
+	ProfitFactor   float64 `json:"profit_factor"`
+	FastSMA        int     `json:"fast_sma"`
+	SlowSMA        int     `json:"slow_sma"`
+	BuyRSIMax      float64 `json:"buy_rsi_max"`
+	SellRSIMin     float64 `json:"sell_rsi_min"`
+	MinConfidence  float64 `json:"min_confidence"`
+	StopLossPct    float64 `json:"stop_loss_pct"`
+	TakeProfitPct  float64 `json:"take_profit_pct"`
+	MaxPositionPct float64 `json:"max_position_pct"`
 }
 
 type BacktestStats struct {
@@ -191,6 +253,8 @@ func main() {
 	backtest := flag.Bool("backtest", false, "run a historical backtest")
 	backtestNoAI := flag.Bool("backtest-no-ai", false, "disable AI reviews during backtest")
 	backtestFormat := flag.String("backtest-format", "json", "backtest output format: json or report")
+	optimize := flag.Int("optimize", 0, "run N parameter sweep backtests and print the best configurations")
+	optimizedConfig := flag.String("optimized-config", "", "write the best optimization risk/strategy to this config file")
 	from := flag.String("from", "", "backtest start date in YYYY-MM-DD format")
 	to := flag.String("to", "", "backtest end date in YYYY-MM-DD format")
 	addr := flag.String("addr", "127.0.0.1:8787", "web dashboard address")
@@ -205,6 +269,29 @@ func main() {
 	}
 
 	if *backtest {
+		if *optimize > 0 {
+			report, err := runBacktestOptimization(*configPath, *from, *to, *backtestNoAI, *optimize)
+			if err != nil {
+				exitErr(err.Error())
+			}
+			if *optimizedConfig != "" {
+				if err := writeOptimizedConfig(*configPath, *optimizedConfig, report); err != nil {
+					exitErr(err.Error())
+				}
+				report.OptimizedConfigPath = *optimizedConfig
+			}
+			switch *backtestFormat {
+			case "json":
+				if err := printJSON(report); err != nil {
+					exitErr(err.Error())
+				}
+			case "report":
+				fmt.Print(formatOptimizationReport(report))
+			default:
+				exitErr("unsupported --backtest-format: choose json or report")
+			}
+			return
+		}
 		report, err := runBacktest(*configPath, *from, *to, *backtestNoAI)
 		if err != nil {
 			exitErr(err.Error())
@@ -283,6 +370,7 @@ func runCycle(configPath string) (Report, error) {
 	applyHalts(&state, cfg, equity)
 
 	reviewSignals(cfg, signals, state)
+	annotateSignalExecutionReasons(signals, state)
 
 	if !state.Halted {
 		for i := range signals {
@@ -448,9 +536,248 @@ func runBacktest(configPath, from, to string, disableAI bool) (BacktestReport, e
 	if disableAI {
 		cfg.AI.Enabled = false
 	}
-	start, end, err := parseBacktestRange(from, to)
+	candlesBySymbol, maxSteps, err := loadHistoricalCandles(cfg, from, to)
 	if err != nil {
 		return BacktestReport{}, err
+	}
+	return simulateBacktest(cfg, candlesBySymbol, from, to, maxSteps), nil
+}
+
+func runBacktestOptimization(configPath, from, to string, disableAI bool, runs int) (OptimizationReport, error) {
+	if from == "" || to == "" {
+		return OptimizationReport{}, errors.New("optimization requires --from and --to in YYYY-MM-DD format")
+	}
+	var cfg Config
+	if err := readJSON(configPath, &cfg); err != nil {
+		return OptimizationReport{}, err
+	}
+	if cfg.Mode != "paper" {
+		return OptimizationReport{}, errors.New("only paper mode is enabled in this version")
+	}
+	if disableAI {
+		cfg.AI.Enabled = false
+	}
+	candlesBySymbol, maxSteps, err := loadHistoricalCandles(cfg, from, to)
+	if err != nil {
+		return OptimizationReport{}, err
+	}
+
+	baselineReport := simulateBacktest(cfg, candlesBySymbol, from, to, maxSteps)
+	minTrades := minOptimizationTrades(maxSteps, cfg.Interval)
+	baseline := optimizationResultWithQuality(0, cfg, baselineReport, minTrades)
+	candidates := generateOptimizationConfigs(cfg, runs)
+	results := make([]OptimizationResult, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate.AI.Enabled = false
+		report := simulateBacktest(candidate, candlesBySymbol, from, to, maxSteps)
+		results = append(results, optimizationResultWithQuality(0, candidate, report, minTrades))
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Qualified != results[j].Qualified {
+			return results[i].Qualified
+		}
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > 10 {
+		results = results[:10]
+	}
+	for i := range results {
+		results[i].Rank = i + 1
+	}
+
+	return OptimizationReport{
+		From:     from,
+		To:       to,
+		Runs:     len(candidates),
+		Baseline: baseline,
+		Best:     results,
+	}, nil
+}
+
+func writeOptimizedConfig(configPath, outputPath string, report OptimizationReport) error {
+	result, ok := recommendedOptimizationResult(report.Best)
+	if !ok {
+		return errors.New("optimization produced no candidate configs")
+	}
+	var cfg Config
+	if err := readJSON(configPath, &cfg); err != nil {
+		return err
+	}
+	return writeJSON(outputPath, applyOptimizationResult(cfg, result))
+}
+
+func recommendedOptimizationResult(results []OptimizationResult) (OptimizationResult, bool) {
+	for _, result := range results {
+		if result.Qualified {
+			return result, true
+		}
+	}
+	if len(results) == 0 {
+		return OptimizationResult{}, false
+	}
+	return results[0], true
+}
+
+func applyOptimizationResult(cfg Config, result OptimizationResult) Config {
+	cfg.Strategy.FastSMA = result.FastSMA
+	cfg.Strategy.SlowSMA = result.SlowSMA
+	cfg.Strategy.BuyRSIMax = result.BuyRSIMax
+	cfg.Strategy.SellRSIMin = result.SellRSIMin
+	cfg.Strategy.MinConfidence = result.MinConfidence
+	cfg.Risk.StopLossPct = result.StopLossPct
+	cfg.Risk.TakeProfitPct = result.TakeProfitPct
+	cfg.Risk.MaxPositionPct = result.MaxPositionPct
+	return cfg
+}
+
+func generateOptimizationConfigs(base Config, limit int) []Config {
+	if limit <= 0 {
+		return nil
+	}
+	fastValues := uniqueInts(base.Strategy.FastSMA, []int{8, 12, 16, 20})
+	slowValues := uniqueInts(base.Strategy.SlowSMA, []int{32, 48, 72, 96})
+	buyRSIValues := uniqueFloats(base.Strategy.BuyRSIMax, []float64{45, 52, 58, 62})
+	sellRSIValues := uniqueFloats(base.Strategy.SellRSIMin, []float64{68, 74, 80})
+	confValues := uniqueFloats(base.Strategy.MinConfidence, []float64{0.58, 0.62, 0.66, 0.70})
+	stopValues := uniqueFloats(base.Risk.StopLossPct, []float64{0.025, 0.035, 0.05})
+	takeValues := uniqueFloats(base.Risk.TakeProfitPct, []float64{0.05, 0.07, 0.10})
+	positionValues := uniqueFloats(base.Risk.MaxPositionPct, []float64{0.10, 0.15, 0.25})
+
+	configs := make([]Config, 0, limit)
+	for _, fast := range fastValues {
+		for _, slow := range slowValues {
+			if fast >= slow {
+				continue
+			}
+			for _, buyRSI := range buyRSIValues {
+				for _, sellRSI := range sellRSIValues {
+					for _, confidence := range confValues {
+						for _, stop := range stopValues {
+							for _, take := range takeValues {
+								for _, position := range positionValues {
+									cfg := base
+									cfg.Strategy.FastSMA = fast
+									cfg.Strategy.SlowSMA = slow
+									cfg.Strategy.BuyRSIMax = buyRSI
+									cfg.Strategy.SellRSIMin = sellRSI
+									cfg.Strategy.MinConfidence = confidence
+									cfg.Risk.StopLossPct = stop
+									cfg.Risk.TakeProfitPct = take
+									cfg.Risk.MaxPositionPct = position
+									configs = append(configs, cfg)
+									if len(configs) >= limit {
+										return configs
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return configs
+}
+
+func optimizationResult(rank int, cfg Config, report BacktestReport) OptimizationResult {
+	return optimizationResultWithQuality(rank, cfg, report, 0)
+}
+
+func optimizationResultWithQuality(rank int, cfg Config, report BacktestReport, minTrades int) OptimizationResult {
+	stats := summarizeBacktest(report)
+	qualified, quality := optimizationQuality(stats, minTrades)
+	score := optimizationScore(report, stats, minTrades)
+	return OptimizationResult{
+		Rank:           rank,
+		Score:          score,
+		Qualified:      qualified,
+		Quality:        quality,
+		PerformancePct: report.PerformancePct,
+		BenchmarkPct:   report.BenchmarkPct,
+		AlphaPct:       report.AlphaPct,
+		MaxDrawdownPct: report.MaxDrawdownPct,
+		ClosedTrades:   stats.ClosedTrades,
+		WinRatePct:     stats.WinRatePct,
+		ProfitFactor:   stats.ProfitFactor,
+		FastSMA:        cfg.Strategy.FastSMA,
+		SlowSMA:        cfg.Strategy.SlowSMA,
+		BuyRSIMax:      cfg.Strategy.BuyRSIMax,
+		SellRSIMin:     cfg.Strategy.SellRSIMin,
+		MinConfidence:  cfg.Strategy.MinConfidence,
+		StopLossPct:    cfg.Risk.StopLossPct,
+		TakeProfitPct:  cfg.Risk.TakeProfitPct,
+		MaxPositionPct: cfg.Risk.MaxPositionPct,
+	}
+}
+
+func optimizationScore(report BacktestReport, stats BacktestStats, minTrades int) float64 {
+	tradeRatio := 1.0
+	if minTrades > 0 {
+		tradeRatio = math.Min(float64(stats.ClosedTrades)/float64(minTrades), 1)
+	}
+	profitFactorScore := 0.0
+	if !math.IsInf(stats.ProfitFactor, 1) {
+		profitFactorScore = clamp(stats.ProfitFactor-1, -1, 2) * 4
+	} else {
+		profitFactorScore = 8
+	}
+	winRateScore := clamp((stats.WinRatePct-40)/20, -1, 1) * 2
+	inactivityPenalty := 0.0
+	if tradeRatio < 1 {
+		inactivityPenalty = (1 - tradeRatio) * 20
+	}
+	lowQualityPenalty := 0.0
+	if stats.ClosedTrades > 0 && stats.ProfitFactor < 1 {
+		lowQualityPenalty += (1 - stats.ProfitFactor) * 8
+	}
+	if stats.ClosedTrades == 0 {
+		lowQualityPenalty += 25
+	}
+	score := report.PerformancePct + report.AlphaPct*0.35 + report.MaxDrawdownPct*0.75 + profitFactorScore + winRateScore - inactivityPenalty - lowQualityPenalty
+	return round4(score)
+}
+
+func optimizationQuality(stats BacktestStats, minTrades int) (bool, string) {
+	if stats.ClosedTrades == 0 {
+		return false, "rejected: no closed trades"
+	}
+	reasons := []string{}
+	if minTrades > 0 && stats.ClosedTrades < minTrades {
+		reasons = append(reasons, fmt.Sprintf("low sample %d/%d trades", stats.ClosedTrades, minTrades))
+	}
+	if stats.ProfitFactor < 1 {
+		reasons = append(reasons, fmt.Sprintf("profit factor %.4f < 1", stats.ProfitFactor))
+	}
+	if stats.WinRatePct < 35 {
+		reasons = append(reasons, fmt.Sprintf("win rate %.2f%% < 35%%", stats.WinRatePct))
+	}
+	if len(reasons) > 0 {
+		return false, "rejected: " + strings.Join(reasons, "; ")
+	}
+	return true, "qualified"
+}
+
+func minOptimizationTrades(steps int, interval string) int {
+	intervalMs, err := intervalDurationMillis(interval)
+	if err != nil || intervalMs <= 0 {
+		return 20
+	}
+	periodMs := int64(steps) * intervalMs
+	days := float64(periodMs) / float64((24*time.Hour)/time.Millisecond)
+	minTrades := int(math.Round(days / 4))
+	if minTrades < 10 {
+		return 10
+	}
+	if minTrades > 40 {
+		return 40
+	}
+	return minTrades
+}
+
+func loadHistoricalCandles(cfg Config, from, to string) (map[string][]Candle, int, error) {
+	start, end, err := parseBacktestRange(from, to)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	candlesBySymbol := map[string][]Candle{}
@@ -458,17 +785,17 @@ func runBacktest(configPath, from, to string, disableAI bool) (BacktestReport, e
 	for _, symbol := range cfg.Symbols {
 		candles, err := fetchHistoricalKlines(symbol, cfg.Interval, start, end)
 		if err != nil {
-			return BacktestReport{}, fmt.Errorf("fetch historical %s: %w", symbol, err)
+			return nil, 0, fmt.Errorf("fetch historical %s: %w", symbol, err)
 		}
 		if len(candles) < cfg.LookbackLimit {
-			return BacktestReport{}, fmt.Errorf("not enough historical candles for %s: got %d, need at least %d", symbol, len(candles), cfg.LookbackLimit)
+			return nil, 0, fmt.Errorf("not enough historical candles for %s: got %d, need at least %d", symbol, len(candles), cfg.LookbackLimit)
 		}
 		candlesBySymbol[symbol] = candles
 		if maxSteps == 0 || len(candles) < maxSteps {
 			maxSteps = len(candles)
 		}
 	}
-	return simulateBacktest(cfg, candlesBySymbol, from, to, maxSteps), nil
+	return candlesBySymbol, maxSteps, nil
 }
 
 func simulateBacktest(cfg Config, candlesBySymbol map[string][]Candle, from, to string, steps int) BacktestReport {
@@ -511,6 +838,7 @@ func simulateBacktest(cfg Config, candlesBySymbol map[string][]Candle, from, to 
 		}
 		applyHaltsAt(&state, cfg, equity, dayKeyFromRFC3339(cycleTime))
 		reviewSignals(cfg, signals, state)
+		annotateSignalExecutionReasons(signals, state)
 
 		if !state.Halted {
 			for j := range signals {
@@ -556,10 +884,15 @@ func simulateBacktest(cfg Config, candlesBySymbol map[string][]Candle, from, to 
 		Positions:      state.Positions,
 		Events:         events,
 		DailyReports:   buildDailyReportsFromRows(equityRows, events),
+		Breakdown:      buildTradeBreakdown(events),
+		Benchmarks:     buildBenchmarks(cfg.Symbols, candlesBySymbol, startIndex, steps),
+		Costs:          cfg.Costs,
 	}
 	if cfg.StartingBudget != 0 {
 		report.PerformancePct = round3((endEquity/cfg.StartingBudget - 1) * 100)
 	}
+	report.BenchmarkPct = equalWeightBenchmarkPct(report.Benchmarks)
+	report.AlphaPct = round3(report.PerformancePct - report.BenchmarkPct)
 	return report
 }
 
@@ -576,8 +909,11 @@ func formatBacktestReport(report BacktestReport) string {
 	fmt.Fprintf(&b, "- Equity finale: %.6f\n", report.Equity)
 	fmt.Fprintf(&b, "- Cash finale: %.6f\n", report.Cash)
 	fmt.Fprintf(&b, "- Performance: %+.3f%%\n", report.PerformancePct)
+	fmt.Fprintf(&b, "- Benchmark equal-weight: %+.3f%%\n", report.BenchmarkPct)
+	fmt.Fprintf(&b, "- Alpha vs benchmark: %+.3f%%\n", report.AlphaPct)
 	fmt.Fprintf(&b, "- PnL realizzato: %+.6f\n", report.RealizedPnL)
 	fmt.Fprintf(&b, "- Max drawdown: %.3f%%\n", report.MaxDrawdownPct)
+	fmt.Fprintf(&b, "- Costi: fee %.4f%%, slippage %.4f%%\n", report.Costs.FeePct*100, report.Costs.SlippagePct*100)
 	fmt.Fprintf(&b, "- Posizioni aperte a fine test: %d\n\n", len(report.Positions))
 
 	fmt.Fprintf(&b, "Trade\n")
@@ -612,6 +948,24 @@ func formatBacktestReport(report BacktestReport) string {
 		fmt.Fprintf(&b, "\n")
 	}
 
+	if len(report.Breakdown.BySymbol) > 0 {
+		fmt.Fprintf(&b, "Breakdown per simbolo\n")
+		writeBreakdownRows(&b, report.Breakdown.BySymbol)
+		fmt.Fprintf(&b, "\n")
+	}
+	if len(report.Breakdown.ByReason) > 0 {
+		fmt.Fprintf(&b, "Breakdown per motivo uscita\n")
+		writeBreakdownRows(&b, report.Breakdown.ByReason)
+		fmt.Fprintf(&b, "\n")
+	}
+	if len(report.Benchmarks) > 0 {
+		fmt.Fprintf(&b, "Benchmark buy-and-hold\n")
+		for _, benchmark := range report.Benchmarks {
+			fmt.Fprintf(&b, "- %s: %+.3f%% (%.6f -> %.6f)\n", benchmark.Symbol, benchmark.PerformancePct, benchmark.StartPrice, benchmark.EndPrice)
+		}
+		fmt.Fprintf(&b, "\n")
+	}
+
 	if len(report.DailyReports) > 0 {
 		fmt.Fprintf(&b, "Ultimi giorni\n")
 		start := len(report.DailyReports) - 5
@@ -625,6 +979,152 @@ func formatBacktestReport(report BacktestReport) string {
 	}
 
 	return b.String()
+}
+
+func formatOptimizationReport(report OptimizationReport) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Backtest optimization\n")
+	fmt.Fprintf(&b, "=====================\n")
+	fmt.Fprintf(&b, "Periodo: %s -> %s | Simulazioni: %d\n\n", report.From, report.To, report.Runs)
+	if report.OptimizedConfigPath != "" {
+		fmt.Fprintf(&b, "Config ottimizzato: %s\n\n", report.OptimizedConfigPath)
+	}
+	fmt.Fprintf(&b, "Baseline\n")
+	writeOptimizationResult(&b, report.Baseline)
+	fmt.Fprintf(&b, "\nMigliori configurazioni\n")
+	for _, result := range report.Best {
+		writeOptimizationResult(&b, result)
+	}
+	return b.String()
+}
+
+func writeOptimizationResult(b *strings.Builder, result OptimizationResult) {
+	rank := ""
+	if result.Rank > 0 {
+		rank = fmt.Sprintf("#%d ", result.Rank)
+	}
+	fmt.Fprintf(b, "- %sscore %.4f | perf %+.3f%% | bench %+.3f%% | alpha %+.3f%% | dd %.3f%% | trades %d | win %.2f%% | pf %s\n",
+		rank, result.Score, result.PerformancePct, result.BenchmarkPct, result.AlphaPct, result.MaxDrawdownPct, result.ClosedTrades, result.WinRatePct, formatProfitFactor(result.ProfitFactor))
+	fmt.Fprintf(b, "  quality=%s\n", result.Quality)
+	fmt.Fprintf(b, "  fast=%d slow=%d buy_rsi=%.2f sell_rsi=%.2f min_conf=%.2f stop=%.3f take=%.3f max_pos=%.2f\n",
+		result.FastSMA, result.SlowSMA, result.BuyRSIMax, result.SellRSIMin, result.MinConfidence, result.StopLossPct, result.TakeProfitPct, result.MaxPositionPct)
+}
+
+func writeBreakdownRows(b *strings.Builder, rows map[string]BreakdownRow) {
+	keys := make([]string, 0, len(rows))
+	for key := range rows {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		row := rows[key]
+		winRate := 0.0
+		if row.Trades > 0 {
+			winRate = round2(float64(row.Wins) / float64(row.Trades) * 100)
+		}
+		fmt.Fprintf(b, "- %s: trades %d, win rate %.2f%%, pnl %+.6f\n", key, row.Trades, winRate, row.RealizedPnL)
+	}
+}
+
+func uniqueInts(base int, values []int) []int {
+	seen := map[int]bool{}
+	out := []int{}
+	for _, value := range append([]int{base}, values...) {
+		if value <= 0 || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func uniqueFloats(base float64, values []float64) []float64 {
+	seen := map[string]bool{}
+	out := []float64{}
+	for _, value := range append([]float64{base}, values...) {
+		if value <= 0 {
+			continue
+		}
+		key := fmt.Sprintf("%.6f", value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	sort.Float64s(out)
+	return out
+}
+
+func buildTradeBreakdown(events []Event) TradeBreakdown {
+	breakdown := TradeBreakdown{
+		BySymbol: map[string]BreakdownRow{},
+		ByReason: map[string]BreakdownRow{},
+	}
+	for _, event := range events {
+		if eventString(event, "type") != "sell" {
+			continue
+		}
+		pnl := round6(eventFloat(event, "pnl"))
+		addBreakdownRow(breakdown.BySymbol, eventString(event, "symbol"), pnl)
+		addBreakdownRow(breakdown.ByReason, eventString(event, "reason"), pnl)
+	}
+	return breakdown
+}
+
+func addBreakdownRow(rows map[string]BreakdownRow, key string, pnl float64) {
+	if key == "" {
+		key = "unknown"
+	}
+	row := rows[key]
+	row.Trades++
+	if pnl >= 0 {
+		row.Wins++
+	} else {
+		row.Losses++
+	}
+	row.RealizedPnL = round6(row.RealizedPnL + pnl)
+	rows[key] = row
+}
+
+func buildBenchmarks(symbols []string, candlesBySymbol map[string][]Candle, startIndex, steps int) []Benchmark {
+	benchmarks := make([]Benchmark, 0, len(symbols))
+	for _, symbol := range symbols {
+		candles := candlesBySymbol[symbol]
+		if len(candles) == 0 || startIndex >= len(candles) || steps <= 0 {
+			continue
+		}
+		endIndex := steps - 1
+		if endIndex >= len(candles) {
+			endIndex = len(candles) - 1
+		}
+		startPrice := candles[startIndex].Close
+		endPrice := candles[endIndex].Close
+		performance := 0.0
+		if startPrice != 0 {
+			performance = round3((endPrice/startPrice - 1) * 100)
+		}
+		benchmarks = append(benchmarks, Benchmark{
+			Symbol:         symbol,
+			StartPrice:     round6(startPrice),
+			EndPrice:       round6(endPrice),
+			PerformancePct: performance,
+		})
+	}
+	return benchmarks
+}
+
+func equalWeightBenchmarkPct(benchmarks []Benchmark) float64 {
+	if len(benchmarks) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, benchmark := range benchmarks {
+		sum += benchmark.PerformancePct
+	}
+	return round3(sum / float64(len(benchmarks)))
 }
 
 func summarizeBacktest(report BacktestReport) BacktestStats {
@@ -778,21 +1278,26 @@ func maybeExitPositionAt(state *State, cfg Config, signal Signal, journalPath, e
 		return nil, nil
 	}
 
-	proceeds := pos.Qty * signal.Price
+	exitPrice := executionPrice(signal.Price, "sell", cfg.Costs)
+	grossProceeds := pos.Qty * exitPrice
+	fee := grossProceeds * cfg.Costs.FeePct
+	proceeds := grossProceeds - fee
 	pnl := proceeds - pos.Cost
 	state.Cash += proceeds
 	state.RealizedPnL += pnl
 	delete(state.Positions, signal.Symbol)
 
 	event := Event{
-		"time":   eventTime,
-		"type":   "sell",
-		"symbol": signal.Symbol,
-		"price":  signal.Price,
-		"qty":    pos.Qty,
-		"pnl":    round6(pnl),
-		"reason": exitReason,
-		"signal": signal,
+		"time":         eventTime,
+		"type":         "sell",
+		"symbol":       signal.Symbol,
+		"price":        round6(exitPrice),
+		"market_price": signal.Price,
+		"qty":          pos.Qty,
+		"fee":          round6(fee),
+		"pnl":          round6(pnl),
+		"reason":       exitReason,
+		"signal":       signal,
 	}
 	if journalPath == "" {
 		return event, nil
@@ -834,30 +1339,39 @@ func maybeEnterPositionAt(state *State, cfg Config, signal *Signal, journalPath,
 
 	maxNotional := cfg.StartingBudget * cfg.Risk.MaxPositionPct
 	riskNotional := cfg.StartingBudget * cfg.Risk.MaxTradeRiskPct / cfg.Risk.StopLossPct
-	notional := math.Min(state.Cash, math.Min(maxNotional, riskNotional))
+	availableNotional := state.Cash
+	if cfg.Costs.FeePct > 0 {
+		availableNotional = state.Cash / (1 + cfg.Costs.FeePct)
+	}
+	notional := math.Min(availableNotional, math.Min(maxNotional, riskNotional))
 	if notional <= 10 {
 		return nil, nil
 	}
 
-	qty := notional / signal.Price
-	state.Cash -= notional
+	entryPrice := executionPrice(signal.Price, "buy", cfg.Costs)
+	fee := notional * cfg.Costs.FeePct
+	totalCost := notional + fee
+	qty := notional / entryPrice
+	state.Cash -= totalCost
 	state.Positions[signal.Symbol] = Position{
 		EntryTime:  eventTime,
-		EntryPrice: signal.Price,
+		EntryPrice: entryPrice,
 		Qty:        qty,
-		Cost:       notional,
+		Cost:       totalCost,
 	}
 	state.TradeCountByDay[day]++
 
 	event := Event{
-		"time":     eventTime,
-		"type":     "buy",
-		"symbol":   signal.Symbol,
-		"price":    signal.Price,
-		"qty":      qty,
-		"notional": round6(notional),
-		"reason":   "strategy_buy",
-		"signal":   signal,
+		"time":         eventTime,
+		"type":         "buy",
+		"symbol":       signal.Symbol,
+		"price":        round6(entryPrice),
+		"market_price": signal.Price,
+		"qty":          qty,
+		"notional":     round6(notional),
+		"fee":          round6(fee),
+		"reason":       "strategy_buy",
+		"signal":       signal,
 	}
 	if journalPath == "" {
 		return event, nil
@@ -871,6 +1385,16 @@ func reviewSignals(cfg Config, signals []Signal, state State) {
 	}
 }
 
+func annotateSignalExecutionReasons(signals []Signal, state State) {
+	for i := range signals {
+		if signals[i].Action == "sell" {
+			if _, exists := state.Positions[signals[i].Symbol]; !exists {
+				signals[i].ExecutionReason = "sell signal ignored: no open position"
+			}
+		}
+	}
+}
+
 func ensureSignalAIReview(cfg Config, signal *Signal, state State) {
 	if signal.AIReview != nil {
 		return
@@ -881,6 +1405,17 @@ func ensureSignalAIReview(cfg Config, signal *Signal, state State) {
 
 func aiRejected(signal Signal) bool {
 	return signal.AIReview != nil && !signal.AIReview.Approved
+}
+
+func executionPrice(price float64, side string, costs Costs) float64 {
+	switch side {
+	case "buy":
+		return price * (1 + costs.SlippagePct)
+	case "sell":
+		return price * (1 - costs.SlippagePct)
+	default:
+		return price
+	}
 }
 
 func aiReviewSignal(cfg Config, signal Signal, state State) AIReview {
