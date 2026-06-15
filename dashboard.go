@@ -416,6 +416,13 @@ const dashboardHTML = `<!doctype html>
     .panel.wide { grid-column: span 8; }
     .panel.narrow { grid-column: span 4; }
     .panel.full { grid-column: 1 / -1; }
+    .main-stack {
+      grid-column: span 8;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+    .main-stack .panel { grid-column: 1; }
     .side-stack {
       grid-column: span 4;
       display: grid;
@@ -477,6 +484,16 @@ const dashboardHTML = `<!doctype html>
       border-radius: 10px;
       padding: 14px;
       min-height: 100%;
+    }
+    .signal-note {
+      grid-column: 1 / -1;
+      background: rgba(244, 183, 64, 0.09);
+      border: 1px solid rgba(244, 183, 64, 0.28);
+      border-radius: 10px;
+      color: var(--warn);
+      padding: 12px 14px;
+      font-size: 13px;
+      font-weight: 700;
     }
     .signal-head {
       display: flex;
@@ -585,6 +602,7 @@ const dashboardHTML = `<!doctype html>
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
       .panel, .panel.wide, .panel.narrow, .panel.full { grid-column: 1; }
+      .main-stack { grid-column: 1; }
       .side-stack { grid-column: 1; }
       .signal-grid { grid-template-columns: 1fr; }
     }
@@ -620,9 +638,15 @@ const dashboardHTML = `<!doctype html>
       <div class="metric"><div class="label">Mode</div><div id="mode" class="value">-</div><div id="halt" class="sub"></div></div>
     </section>
     <section class="grid">
-      <div class="panel wide">
-        <h2>Capital curve</h2>
-        <div class="panel-body"><canvas id="equityChart" height="300"></canvas></div>
+      <div class="main-stack">
+        <div class="panel">
+          <h2>Capital curve</h2>
+          <div class="panel-body"><canvas id="equityChart" height="300"></canvas></div>
+        </div>
+        <div class="panel">
+          <h2>Signals</h2>
+          <div class="panel-body"><div id="signals" class="signal-grid"></div></div>
+        </div>
       </div>
       <aside class="side-stack">
         <div class="panel">
@@ -641,10 +665,6 @@ const dashboardHTML = `<!doctype html>
           </div>
         </div>
       </aside>
-      <div class="panel wide">
-        <h2>Signals</h2>
-        <div class="panel-body"><div id="signals" class="signal-grid"></div></div>
-      </div>
     </section>
   </main>
   <script>
@@ -693,7 +713,7 @@ const dashboardHTML = `<!doctype html>
       if (data.last_error) renderError(data.last_error); else errorBox.style.display = "none";
       if (!report) {
         renderPositions({});
-        renderSignals([]);
+        renderSignals([], []);
         renderJournal(data.journal || []);
         renderDailyReport(data.daily_report);
         drawChart(document.getElementById("equityChart"), data.history || []);
@@ -711,12 +731,12 @@ const dashboardHTML = `<!doctype html>
       document.getElementById("pnl").className = "value " + (report.equity >= start ? "positive" : "negative");
       setText("drawdown", report.drawdown_pct.toFixed(3) + "%");
       setText("cycles", String(data.cycle_count || (data.history || []).length));
-      setText("cycleSub", data.running && !events.length ? "showing saved state; cycle in progress" : (events.length ? (events.length + " event(s) in last cycle") : "last cycle completed"));
+      setText("cycleSub", data.running && !events.length ? "showing saved state; cycle in progress" : (events.length ? (events.length + " event(s) in last cycle") : "no trades in last cycle"));
       setText("mode", report.mode);
       setText("halt", report.halted ? ("halted: " + (report.halt_reason || "risk limit")) : "paper trading active");
 
       renderPositions(report.positions || {});
-      renderSignals(report.signals || []);
+      renderSignals(report.signals || [], events);
       renderJournal(data.journal || []);
       renderDailyReport(data.daily_report);
       drawChart(document.getElementById("equityChart"), data.history || []);
@@ -733,10 +753,13 @@ const dashboardHTML = `<!doctype html>
       document.getElementById("positions").innerHTML = rows.join("") || "<tr><td colspan='4'>No open positions</td></tr>";
     }
 
-    function renderSignals(signals) {
-      document.getElementById("signals").innerHTML = signals.map(s =>
+    function renderSignals(signals, events) {
+      const hasEvents = events && events.length > 0;
+      const allHold = signals.length > 0 && signals.every(s => s.action === "hold");
+      const note = !hasEvents ? "<div class='signal-note'>No trade executed in the last cycle. Current signals are below; hold cards explain why the bot is waiting.</div>" : "";
+      document.getElementById("signals").innerHTML = note + (signals.map(s =>
         "<article class='signal-card'><div class='signal-head'><div><div class='asset'>" + esc(s.symbol) + "</div>" + renderExecutionReason(s.execution_reason) + "</div><span class='pill " + esc(s.action) + "'>" + esc(s.action) + "</span></div><div class='stat-grid'><div class='stat'><div class='label'>Price</div><strong>" + fmtMoney.format(s.price) + "</strong></div><div class='stat'><div class='label'>Confidence</div><strong>" + (s.confidence * 100).toFixed(1) + "%</strong></div><div class='stat'><div class='label'>RSI</div><strong>" + (s.rsi || 0).toFixed(2) + "</strong></div></div>" + renderStrategy(s) + renderAIReview(s.ai_review) + "</article>"
-      ).join("") || "<div class='sub'>No signals yet</div>";
+      ).join("") || "<div class='sub'>" + (allHold ? "All signals are hold." : "No signals yet") + "</div>");
     }
 
     function renderExecutionReason(reason) {

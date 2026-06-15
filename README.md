@@ -109,7 +109,8 @@ Nel file `config.json` puoi abilitare:
 ```json
 "ai": {
   "enabled": true,
-  "require_approval_for_buys": false,
+  "require_approval_for_buys": true,
+  "require_approval_for_sells": false,
   "provider": "local",
   "model": "nvidia/nemotron-3-nano-4b"
 }
@@ -117,7 +118,18 @@ Nel file `config.json` puoi abilitare:
 
 Il bot chiama un server locale compatibile OpenAI su `http://127.0.0.1:1234/v1/chat/completions`.
 
-Il revisore AI non genera trade da solo: riceve ogni segnale quantitativo e puo spiegarlo, approvarlo o segnalarlo come debole. Con `require_approval_for_buys: false` il reviewer e consultivo: il suo giudizio resta nel segnale e nel journal, ma non blocca un buy paper generato dalla strategia quantitativa. Con `require_approval_for_buys: true` diventa un gate rigido: se boccia un buy, il bot non compra; se l'AI non risponde su un buy, il bot non compra. Stop loss e take profit restano sempre prioritari.
+Il revisore AI non genera trade da solo: riceve ogni segnale quantitativo e puo spiegarlo, approvarlo o segnalarlo come debole. Con `require_approval_for_buys: true` diventa un gate rigido sui buy: se boccia o non risponde, il bot non compra. `require_approval_for_sells` e separato: di default puo restare `false` per rendere l'AI consultiva sulle uscite strategiche. Stop loss e take profit restano sempre prioritari.
+
+Nel rischio puoi ridurre churn e rientri impulsivi con:
+
+```json
+"risk": {
+  "min_hold_minutes": 120,
+  "cooldown_minutes": 180
+}
+```
+
+`min_hold_minutes` blocca solo le uscite strategiche troppo rapide; stop loss e take profit possono comunque chiudere subito. `cooldown_minutes` impedisce nuovi buy sullo stesso simbolo per un certo periodo dopo una chiusura.
 
 ## Strategie esoteriche opzionali
 
@@ -125,15 +137,15 @@ La strategia classica resta il default. Per provare moduli aggiuntivi senza camb
 
 ```json
 "strategy": {
-  "mode": "ensemble",
-  "enabled_modules": ["chaos_gate", "volume_echo", "regime_oracle"],
+  "mode": "parallel",
+  "enabled_modules": ["chaos_gate", "trend_rider", "volume_echo", "regime_oracle"],
   "ensemble_min_votes": 2,
-  "fast_sma": 12,
-  "slow_sma": 48,
+  "fast_sma": 8,
+  "slow_sma": 32,
   "rsi_period": 14,
-  "buy_rsi_max": 62,
+  "buy_rsi_max": 52,
   "sell_rsi_min": 74,
-  "min_confidence": 0.62,
+  "min_confidence": 0.58,
   "chaos_period": 18,
   "chaos_min_efficiency": 0.28,
   "volume_period": 24,
@@ -142,7 +154,7 @@ La strategia classica resta il default. Per provare moduli aggiuntivi senza camb
 }
 ```
 
-`chaos_gate` misura quanto il movimento e direzionale rispetto al rumore e puo bloccare buy in fasi troppo confuse. `volume_echo` cerca accelerazioni di volume con momentum coerente. `regime_oracle` classifica il mercato in trend, chop, squeeze, panic o mixed e modifica la confidenza. Con `mode: "ensemble"` i moduli confermano o filtrano la strategia classica; con `mode: "parallel"` possono generare un buy anche quando la strategia classica e in hold, se raggiungono i voti minimi.
+`chaos_gate` misura quanto il movimento e direzionale rispetto al rumore e puo bloccare buy in fasi troppo confuse. `trend_rider` e il modulo aggressivo: cerca trend gia partiti e puo comprare anche quando la strategia classica resta in hold per RSI non ideale. `volume_echo` cerca accelerazioni di volume con momentum coerente. `regime_oracle` classifica il mercato in trend, chop, squeeze, panic o mixed e modifica la confidenza. Con `mode: "ensemble"` i moduli confermano o filtrano la strategia classica; con `mode: "parallel"` possono generare un buy anche quando la strategia classica e in hold, se raggiungono i voti minimi. Anche le sell richiedono consenso: un RSI alto da solo non basta piu se i moduli restano buy/hold.
 
 ## Backtest storico
 

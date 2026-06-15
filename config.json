@@ -2,7 +2,11 @@
   "mode": "paper",
   "quote_asset": "USDT",
   "starting_budget": 1000.0,
-  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT"
+  ],
   "interval": "1h",
   "lookback_limit": 180,
   "market_data": {
@@ -11,32 +15,40 @@
   "ai": {
     "enabled": true,
     "require_approval_for_buys": false,
+    "require_approval_for_sells": false,
     "provider": "local",
     "model": "nvidia/nemotron-3-nano-4b"
   },
   "risk": {
     "max_position_pct": 0.25,
-    "max_trade_risk_pct": 0.01,
-    "daily_loss_limit_pct": 0.03,
+    "max_trade_risk_pct": 0.015,
+    "daily_loss_limit_pct": 0.05,
     "total_loss_stop_pct": 0.25,
-    "max_trades_per_day": 4,
+    "max_trades_per_day": 8,
     "stop_loss_pct": 0.035,
-    "take_profit_pct": 0.07
+    "take_profit_pct": 0.1,
+    "min_hold_minutes": 20,
+    "cooldown_minutes": 30
   },
   "strategy": {
     "mode": "parallel",
-    "enabled_modules": ["chaos_gate","volume_echo","regime_oracle"],
+    "enabled_modules": [
+      "chaos_gate",
+      "trend_rider",
+      "volume_echo",
+      "regime_oracle"
+    ],
     "ensemble_min_votes": 1,
     "fast_sma": 8,
     "slow_sma": 32,
     "rsi_period": 14,
-    "buy_rsi_max": 62,
-    "sell_rsi_min": 74,
+    "buy_rsi_max": 68,
+    "sell_rsi_min": 78,
     "min_confidence": 0.42,
     "chaos_period": 18,
-    "chaos_min_efficiency": 0.2,
+    "chaos_min_efficiency": 0.18,
     "volume_period": 24,
-    "volume_spike_multiplier": 1.3,
+    "volume_spike_multiplier": 1.25,
     "regime_period": 48
   },
   "costs": {

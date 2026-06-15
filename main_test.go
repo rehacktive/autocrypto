@@ -192,6 +192,47 @@ func TestEsotericParallelVolumeEchoCanBuy(t *testing.T) {
 	}
 }
 
+func TestEsotericTrendRiderCanBuyStrongTrend(t *testing.T) {
+	cfg := testConfig()
+	cfg.Strategy.Mode = "parallel"
+	cfg.Strategy.EnabledModules = []string{"trend_rider"}
+	cfg.Strategy.EnsembleMinVotes = 1
+	cfg.Strategy.MinConfidence = 0
+	cfg.Strategy.BuyRSIMax = 45
+	cfg.Strategy.SellRSIMin = 101
+
+	closes := make([]float64, 0, 32)
+	for i := 0; i < 24; i++ {
+		closes = append(closes, 100)
+	}
+	closes = append(closes, 101, 102, 103, 104, 105, 106, 107, 108)
+	signal := buildSignal("BTCUSDT", candlesFromCloses(closes...), cfg)
+	if signal.Action != "buy" {
+		t.Fatalf("expected trend rider buy, got %q with reason %q", signal.Action, signal.Reason)
+	}
+	if len(signal.Modules) != 1 || signal.Modules[0].Name != "trend_rider" || signal.Modules[0].Action != "buy" {
+		t.Fatalf("expected trend rider buy annotation, got %#v", signal.Modules)
+	}
+}
+
+func TestEsotericStrategyRequiresSellConsensus(t *testing.T) {
+	cfg := testConfig()
+	cfg.Strategy.Mode = "parallel"
+	cfg.Strategy.EnabledModules = []string{"chaos_gate", "regime_oracle"}
+	cfg.Strategy.EnsembleMinVotes = 2
+
+	classic := Signal{Symbol: "BTCUSDT", Action: "sell", Confidence: 0.5, Price: 100, FastSMA: 105, SlowSMA: 100, RSI: 75, Reason: "classic rsi sell"}
+	modules := []StrategyModuleResult{
+		{Name: "chaos_gate", Action: "buy", ConfidenceDelta: 0.08, Reason: "trend still efficient"},
+		{Name: "regime_oracle", Action: "hold", ConfidenceDelta: 0.03, Reason: "squeeze"},
+	}
+
+	signal := combineStrategySignals(classic, modules, cfg.Strategy)
+	if signal.Action != "hold" {
+		t.Fatalf("expected sell without module consensus to become hold, got %q", signal.Action)
+	}
+}
+
 func TestFetchHistoricalKlinesUsesDateRange(t *testing.T) {
 	previousClient := http.DefaultClient
 	t.Cleanup(func() {
@@ -721,6 +762,7 @@ func TestMaybeExitPositionAppliesTakeProfit(t *testing.T) {
 
 func TestMaybeExitPositionSkipsRejectedStrategySell(t *testing.T) {
 	cfg := testConfig()
+	cfg.AI.RequireApprovalForSells = true
 	state := State{
 		Cash: 100,
 		Positions: map[string]Position{
@@ -743,6 +785,77 @@ func TestMaybeExitPositionSkipsRejectedStrategySell(t *testing.T) {
 	}
 	if _, exists := state.Positions["BTCUSDT"]; !exists {
 		t.Fatal("expected position to remain open")
+	}
+}
+
+func TestMaybeExitPositionAllowsRejectedStrategySellWhenSellApprovalNotRequired(t *testing.T) {
+	cfg := testConfig()
+	cfg.AI.RequireApprovalForSells = false
+	state := State{
+		Cash: 100,
+		Positions: map[string]Position{
+			"BTCUSDT": {EntryTime: "2026-06-14T08:00:00Z", EntryPrice: 100, Qty: 2, Cost: 200},
+		},
+	}
+	signal := Signal{
+		Symbol:   "BTCUSDT",
+		Action:   "sell",
+		Price:    101,
+		AIReview: &AIReview{Approved: false, Confidence: 0.3, Reason: "sell not justified"},
+	}
+
+	event, err := maybeExitPositionAt(&state, cfg, signal, "", "2026-06-14T11:00:00Z")
+	if err != nil {
+		t.Fatalf("maybeExitPositionAt returned error: %v", err)
+	}
+	if event == nil || event["reason"] != "strategy_sell" {
+		t.Fatalf("expected advisory sell rejection to allow strategy exit, got %#v", event)
+	}
+}
+
+func TestMaybeExitPositionRespectsMinHoldForStrategySell(t *testing.T) {
+	cfg := testConfig()
+	cfg.Risk.MinHoldMinutes = 120
+	state := State{
+		Cash: 100,
+		Positions: map[string]Position{
+			"BTCUSDT": {EntryTime: "2026-06-14T08:00:00Z", EntryPrice: 100, Qty: 2, Cost: 200},
+		},
+	}
+	signal := Signal{Symbol: "BTCUSDT", Action: "sell", Price: 101}
+
+	event, err := maybeExitPositionAt(&state, cfg, signal, "", "2026-06-14T08:30:00Z")
+	if err != nil {
+		t.Fatalf("maybeExitPositionAt returned error: %v", err)
+	}
+	if event != nil {
+		t.Fatalf("expected min hold to skip strategy sell, got %#v", event)
+	}
+	if _, exists := state.Positions["BTCUSDT"]; !exists {
+		t.Fatal("expected position to remain open during min hold")
+	}
+}
+
+func TestMaybeEnterPositionRespectsCooldownAfterExit(t *testing.T) {
+	cfg := testConfig()
+	cfg.Risk.CooldownMinutes = 180
+	state := State{
+		Cash:             1000,
+		Positions:        map[string]Position{},
+		TradeCountByDay:  map[string]int{},
+		LastExitBySymbol: map[string]string{"BTCUSDT": "2026-06-14T08:00:00Z"},
+	}
+	signal := Signal{Symbol: "BTCUSDT", Action: "buy", Price: 100, Confidence: 0.8}
+
+	event, err := maybeEnterPositionAt(&state, cfg, &signal, "", "2026-06-14T09:00:00Z")
+	if err != nil {
+		t.Fatalf("maybeEnterPositionAt returned error: %v", err)
+	}
+	if event != nil {
+		t.Fatalf("expected cooldown to skip buy, got %#v", event)
+	}
+	if _, exists := state.Positions["BTCUSDT"]; exists {
+		t.Fatal("did not expect position during cooldown")
 	}
 }
 
@@ -843,7 +956,7 @@ func TestLoadStateInitializesMissingMaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadState for existing file returned error: %v", err)
 	}
-	if state.Positions == nil || state.TradeCountByDay == nil || state.DayStartEquity == nil {
+	if state.Positions == nil || state.TradeCountByDay == nil || state.LastExitBySymbol == nil || state.DayStartEquity == nil {
 		t.Fatalf("expected maps to be initialized: %#v", state)
 	}
 }

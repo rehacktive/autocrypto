@@ -42,10 +42,11 @@ type MarketDataConfig struct {
 }
 
 type AIConfig struct {
-	Enabled                bool   `json:"enabled"`
-	RequireApprovalForBuys bool   `json:"require_approval_for_buys"`
-	Provider               string `json:"provider"`
-	Model                  string `json:"model"`
+	Enabled                 bool   `json:"enabled"`
+	RequireApprovalForBuys  bool   `json:"require_approval_for_buys"`
+	RequireApprovalForSells bool   `json:"require_approval_for_sells,omitempty"`
+	Provider                string `json:"provider"`
+	Model                   string `json:"model"`
 }
 
 type Risk struct {
@@ -56,6 +57,8 @@ type Risk struct {
 	MaxTradesPerDay   int     `json:"max_trades_per_day"`
 	StopLossPct       float64 `json:"stop_loss_pct"`
 	TakeProfitPct     float64 `json:"take_profit_pct"`
+	MinHoldMinutes    int     `json:"min_hold_minutes,omitempty"`
+	CooldownMinutes   int     `json:"cooldown_minutes,omitempty"`
 }
 
 type Strategy struct {
@@ -88,16 +91,17 @@ type Position struct {
 }
 
 type State struct {
-	CreatedAt       string              `json:"created_at"`
-	Cash            float64             `json:"cash"`
-	Positions       map[string]Position `json:"positions"`
-	RealizedPnL     float64             `json:"realized_pnl"`
-	TradeCountByDay map[string]int      `json:"trade_count_by_day"`
-	DayStartEquity  map[string]float64  `json:"day_start_equity"`
-	Halted          bool                `json:"halted"`
-	HaltReason      *string             `json:"halt_reason"`
-	LastEquity      float64             `json:"last_equity"`
-	HighWatermark   float64             `json:"high_watermark"`
+	CreatedAt        string              `json:"created_at"`
+	Cash             float64             `json:"cash"`
+	Positions        map[string]Position `json:"positions"`
+	RealizedPnL      float64             `json:"realized_pnl"`
+	TradeCountByDay  map[string]int      `json:"trade_count_by_day"`
+	LastExitBySymbol map[string]string   `json:"last_exit_by_symbol,omitempty"`
+	DayStartEquity   map[string]float64  `json:"day_start_equity"`
+	Halted           bool                `json:"halted"`
+	HaltReason       *string             `json:"halt_reason"`
+	LastEquity       float64             `json:"last_equity"`
+	HighWatermark    float64             `json:"high_watermark"`
 }
 
 type Candle struct {
@@ -951,16 +955,17 @@ func loadHistoricalCandlesWithProvider(cfg Config, marketData MarketDataProvider
 
 func simulateBacktest(cfg Config, candlesBySymbol map[string][]Candle, from, to string, steps int) BacktestReport {
 	state := State{
-		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		Cash:            cfg.StartingBudget,
-		Positions:       map[string]Position{},
-		RealizedPnL:     0,
-		TradeCountByDay: map[string]int{},
-		DayStartEquity:  map[string]float64{},
-		Halted:          false,
-		HaltReason:      nil,
-		LastEquity:      cfg.StartingBudget,
-		HighWatermark:   cfg.StartingBudget,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+		Cash:             cfg.StartingBudget,
+		Positions:        map[string]Position{},
+		RealizedPnL:      0,
+		TradeCountByDay:  map[string]int{},
+		LastExitBySymbol: map[string]string{},
+		DayStartEquity:   map[string]float64{},
+		Halted:           false,
+		HaltReason:       nil,
+		LastEquity:       cfg.StartingBudget,
+		HighWatermark:    cfg.StartingBudget,
 	}
 	events := []Event{}
 	equityRows := []EquityRow{}
@@ -1443,6 +1448,8 @@ func evaluateStrategyModules(symbol string, candles []Candle, cfg Config, classi
 			continue
 		case "chaos_gate":
 			results = append(results, chaosGateSignal(candles, cfg.Strategy, classic))
+		case "trend_rider":
+			results = append(results, trendRiderSignal(candles, cfg.Strategy, classic))
 		case "volume_echo":
 			results = append(results, volumeEchoSignal(candles, cfg.Strategy))
 		case "regime_oracle":
@@ -1520,8 +1527,6 @@ func combineStrategySignals(classic Signal, modules []StrategyModuleResult, stra
 		out.Action = "buy"
 	case mode == "parallel" && !vetoBuy && buyVotes >= minVotes && out.Confidence >= strategy.MinConfidence:
 		out.Action = "buy"
-	case classic.Action == "sell":
-		out.Action = "sell"
 	default:
 		out.Action = "hold"
 	}
@@ -1580,6 +1585,34 @@ func chaosGateSignal(candles []Candle, strategy Strategy, classic Signal) Strate
 		result.ConfidenceDelta = 0.05
 	default:
 		result.ConfidenceDelta = -0.03
+	}
+	return result
+}
+
+func trendRiderSignal(candles []Candle, strategy Strategy, classic Signal) StrategyModuleResult {
+	if len(candles) < 3 || classic.Price <= 0 || classic.SlowSMA <= 0 {
+		return StrategyModuleResult{Name: "trend_rider", Action: "hold", Reason: "not enough trend context"}
+	}
+	trendGap := classic.FastSMA/classic.SlowSMA - 1
+	priceAboveFast := classic.Price/classic.FastSMA - 1
+	result := StrategyModuleResult{
+		Name:   "trend_rider",
+		Action: "hold",
+		Reason: fmt.Sprintf("trend_gap=%.4f price_vs_fast=%.4f rsi=%.2f", trendGap, priceAboveFast, classic.RSI),
+	}
+	switch {
+	case classic.FastSMA <= classic.SlowSMA:
+		result.ConfidenceDelta = -0.04
+	case classic.RSI >= strategy.SellRSIMin:
+		result.ConfidenceDelta = -0.02
+	case trendGap >= 0.0025 && priceAboveFast >= -0.006:
+		result.Action = "buy"
+		result.ConfidenceDelta = 0.12
+	case trendGap >= 0.0012 && classic.RSI <= strategy.BuyRSIMax+8:
+		result.Action = "buy"
+		result.ConfidenceDelta = 0.08
+	default:
+		result.ConfidenceDelta = 0.02
 	}
 	return result
 }
@@ -1746,6 +1779,9 @@ func maybeExitPositionAt(state *State, cfg Config, signal Signal, journalPath, e
 	case changePct >= cfg.Risk.TakeProfitPct:
 		exitReason = "take_profit"
 	case signal.Action == "sell" && !shouldBlockAIRejection(cfg, signal):
+		if !minHoldElapsed(pos.EntryTime, eventTime, cfg.Risk.MinHoldMinutes) {
+			return nil, nil
+		}
 		exitReason = "strategy_sell"
 	default:
 		return nil, nil
@@ -1759,6 +1795,10 @@ func maybeExitPositionAt(state *State, cfg Config, signal Signal, journalPath, e
 	state.Cash += proceeds
 	state.RealizedPnL += pnl
 	delete(state.Positions, signal.Symbol)
+	if state.LastExitBySymbol == nil {
+		state.LastExitBySymbol = map[string]string{}
+	}
+	state.LastExitBySymbol[signal.Symbol] = eventTime
 
 	event := Event{
 		"time":         eventTime,
@@ -1782,11 +1822,37 @@ func maybeEnterPosition(state *State, cfg Config, signal *Signal, journalPath st
 	return maybeEnterPositionAt(state, cfg, signal, journalPath, time.Now().UTC().Format(time.RFC3339))
 }
 
+func minHoldElapsed(entryTime, eventTime string, minHoldMinutes int) bool {
+	if minHoldMinutes <= 0 {
+		return true
+	}
+	return minutesBetween(entryTime, eventTime) >= float64(minHoldMinutes)
+}
+
+func cooldownElapsed(lastExitTime, eventTime string, cooldownMinutes int) bool {
+	if cooldownMinutes <= 0 || lastExitTime == "" {
+		return true
+	}
+	return minutesBetween(lastExitTime, eventTime) >= float64(cooldownMinutes)
+}
+
+func minutesBetween(startTime, endTime string) float64 {
+	start, errStart := time.Parse(time.RFC3339, startTime)
+	end, errEnd := time.Parse(time.RFC3339, endTime)
+	if errStart != nil || errEnd != nil {
+		return math.Inf(1)
+	}
+	return end.Sub(start).Minutes()
+}
+
 func maybeEnterPositionAt(state *State, cfg Config, signal *Signal, journalPath, eventTime string) (Event, error) {
 	if signal.Action != "buy" {
 		return nil, nil
 	}
 	if _, exists := state.Positions[signal.Symbol]; exists {
+		return nil, nil
+	}
+	if !cooldownElapsed(state.LastExitBySymbol[signal.Symbol], eventTime, cfg.Risk.CooldownMinutes) {
 		return nil, nil
 	}
 
@@ -1881,8 +1947,10 @@ func shouldBlockAIRejection(cfg Config, signal Signal) bool {
 		return false
 	}
 	switch signal.Action {
-	case "buy", "sell":
+	case "buy":
 		return cfg.AI.RequireApprovalForBuys
+	case "sell":
+		return cfg.AI.RequireApprovalForSells
 	default:
 		return false
 	}
@@ -2008,16 +2076,17 @@ func localAIReview(model string, payload map[string]any) (AIReview, error) {
 func loadState(path string, cfg Config) (State, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return State{
-			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-			Cash:            cfg.StartingBudget,
-			Positions:       map[string]Position{},
-			RealizedPnL:     0,
-			TradeCountByDay: map[string]int{},
-			DayStartEquity:  map[string]float64{},
-			Halted:          false,
-			HaltReason:      nil,
-			LastEquity:      cfg.StartingBudget,
-			HighWatermark:   cfg.StartingBudget,
+			CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+			Cash:             cfg.StartingBudget,
+			Positions:        map[string]Position{},
+			RealizedPnL:      0,
+			TradeCountByDay:  map[string]int{},
+			LastExitBySymbol: map[string]string{},
+			DayStartEquity:   map[string]float64{},
+			Halted:           false,
+			HaltReason:       nil,
+			LastEquity:       cfg.StartingBudget,
+			HighWatermark:    cfg.StartingBudget,
 		}, nil
 	}
 	var state State
@@ -2029,6 +2098,9 @@ func loadState(path string, cfg Config) (State, error) {
 	}
 	if state.TradeCountByDay == nil {
 		state.TradeCountByDay = map[string]int{}
+	}
+	if state.LastExitBySymbol == nil {
+		state.LastExitBySymbol = map[string]string{}
 	}
 	if state.DayStartEquity == nil {
 		state.DayStartEquity = map[string]float64{}
