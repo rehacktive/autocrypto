@@ -386,6 +386,7 @@ func runCycle(configPath string) (Report, error) {
 	statePath := filepath.Join(baseDir, "state.json")
 	journalPath := filepath.Join(baseDir, "journal.jsonl")
 	equityPath := filepath.Join(baseDir, "equity.jsonl")
+	priceHistoryPath := filepath.Join(baseDir, "price_history.jsonl")
 	dailyReportPath := filepath.Join(baseDir, "daily_report.json")
 
 	state, err := loadState(statePath, cfg)
@@ -420,7 +421,7 @@ func runCycle(configPath string) (Report, error) {
 	applyHalts(&state, cfg, equity)
 
 	reviewSignals(cfg, signals, state)
-	annotateSignalExecutionReasons(signals, state)
+	annotateSignalExecutionReasons(signals, state, cfg, todayKey(), time.Now().UTC().Format(time.RFC3339))
 
 	if !state.Halted {
 		for i := range signals {
@@ -473,6 +474,19 @@ func runCycle(configPath string) (Report, error) {
 		"drawdown_pct": report.DrawdownPct,
 	}); err != nil {
 		return Report{}, err
+	}
+	for _, symbol := range cfg.Symbols {
+		price := latestPrices[symbol]
+		if price <= 0 {
+			continue
+		}
+		if err := appendJSONL(priceHistoryPath, PriceRow{
+			Time:   report.Time,
+			Symbol: symbol,
+			Price:  round6(price),
+		}); err != nil {
+			return Report{}, err
+		}
 	}
 	if _, err := writeDailyReport(dailyReportPath, equityPath, journalPath, todayKey()); err != nil {
 		return Report{}, err
@@ -995,7 +1009,7 @@ func simulateBacktest(cfg Config, candlesBySymbol map[string][]Candle, from, to 
 		}
 		applyHaltsAt(&state, cfg, equity, dayKeyFromRFC3339(cycleTime))
 		reviewSignals(cfg, signals, state)
-		annotateSignalExecutionReasons(signals, state)
+		annotateSignalExecutionReasons(signals, state, cfg, dayKeyFromRFC3339(cycleTime), cycleTime)
 
 		if !state.Halted {
 			for j := range signals {
@@ -1924,14 +1938,53 @@ func reviewSignals(cfg Config, signals []Signal, state State) {
 	}
 }
 
-func annotateSignalExecutionReasons(signals []Signal, state State) {
+func annotateSignalExecutionReasons(signals []Signal, state State, cfg Config, day, eventTime string) {
 	for i := range signals {
-		if signals[i].Action == "sell" {
+		switch signals[i].Action {
+		case "sell":
 			if _, exists := state.Positions[signals[i].Symbol]; !exists {
 				signals[i].ExecutionReason = "sell signal ignored: no open position"
 			}
+		case "buy":
+			switch {
+			case state.Halted:
+				signals[i].ExecutionReason = "buy signal ignored: risk halt active"
+			case positionExists(state, signals[i].Symbol):
+				signals[i].ExecutionReason = "buy signal ignored: position already open"
+			case !cooldownElapsed(state.LastExitBySymbol[signals[i].Symbol], eventTime, cfg.Risk.CooldownMinutes):
+				signals[i].ExecutionReason = fmt.Sprintf("buy signal ignored: cooldown active until %s", cooldownUntil(state.LastExitBySymbol[signals[i].Symbol], cfg.Risk.CooldownMinutes))
+			case shouldBlockAIRejection(cfg, signals[i]):
+				signals[i].ExecutionReason = "buy signal ignored: AI rejected signal"
+			case state.TradeCountByDay[day] >= cfg.Risk.MaxTradesPerDay:
+				signals[i].ExecutionReason = fmt.Sprintf("buy signal ignored: max trades per day reached (%d/%d)", state.TradeCountByDay[day], cfg.Risk.MaxTradesPerDay)
+			case estimatedEntryNotional(state, cfg) <= 10:
+				signals[i].ExecutionReason = "buy signal ignored: available notional below minimum"
+			}
 		}
 	}
+}
+
+func positionExists(state State, symbol string) bool {
+	_, exists := state.Positions[symbol]
+	return exists
+}
+
+func cooldownUntil(lastExitTime string, cooldownMinutes int) string {
+	lastExit, err := time.Parse(time.RFC3339, lastExitTime)
+	if err != nil || cooldownMinutes <= 0 {
+		return ""
+	}
+	return lastExit.Add(time.Duration(cooldownMinutes) * time.Minute).UTC().Format(time.RFC3339)
+}
+
+func estimatedEntryNotional(state State, cfg Config) float64 {
+	maxNotional := cfg.StartingBudget * cfg.Risk.MaxPositionPct
+	riskNotional := cfg.StartingBudget * cfg.Risk.MaxTradeRiskPct / cfg.Risk.StopLossPct
+	availableNotional := state.Cash
+	if cfg.Costs.FeePct > 0 {
+		availableNotional = state.Cash / (1 + cfg.Costs.FeePct)
+	}
+	return math.Min(availableNotional, math.Min(maxNotional, riskNotional))
 }
 
 func ensureSignalAIReview(cfg Config, signal *Signal, state State) {

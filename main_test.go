@@ -884,6 +884,7 @@ func TestMaybeExitPositionRiskExitIgnoresRejectedAI(t *testing.T) {
 }
 
 func TestAnnotateSignalExecutionReasonsForIgnoredSell(t *testing.T) {
+	cfg := testConfig()
 	signals := []Signal{
 		{Symbol: "BTCUSDT", Action: "sell"},
 		{Symbol: "ETHUSDT", Action: "sell"},
@@ -895,7 +896,7 @@ func TestAnnotateSignalExecutionReasonsForIgnoredSell(t *testing.T) {
 		},
 	}
 
-	annotateSignalExecutionReasons(signals, state)
+	annotateSignalExecutionReasons(signals, state, cfg, "2026-06-15", "2026-06-15T12:00:00Z")
 	if signals[0].ExecutionReason != "sell signal ignored: no open position" {
 		t.Fatalf("expected ignored sell reason, got %q", signals[0].ExecutionReason)
 	}
@@ -904,6 +905,22 @@ func TestAnnotateSignalExecutionReasonsForIgnoredSell(t *testing.T) {
 	}
 	if signals[2].ExecutionReason != "" {
 		t.Fatalf("did not expect reason for hold, got %q", signals[2].ExecutionReason)
+	}
+}
+
+func TestAnnotateSignalExecutionReasonsForMaxTradesBuy(t *testing.T) {
+	cfg := testConfig()
+	cfg.Risk.MaxTradesPerDay = 8
+	signals := []Signal{{Symbol: "BTCUSDT", Action: "buy", Price: 100}}
+	state := State{
+		Cash:            1000,
+		Positions:       map[string]Position{},
+		TradeCountByDay: map[string]int{"2026-06-15": 8},
+	}
+
+	annotateSignalExecutionReasons(signals, state, cfg, "2026-06-15", "2026-06-15T12:00:00Z")
+	if signals[0].ExecutionReason != "buy signal ignored: max trades per day reached (8/8)" {
+		t.Fatalf("expected max trades reason, got %q", signals[0].ExecutionReason)
 	}
 }
 
@@ -1034,11 +1051,15 @@ func TestReviewSignalsAnnotatesSignals(t *testing.T) {
 func TestJSONLReadersKeepNewestRows(t *testing.T) {
 	dir := t.TempDir()
 	equityPath := filepath.Join(dir, "equity.jsonl")
+	pricePath := filepath.Join(dir, "price_history.jsonl")
 	journalPath := filepath.Join(dir, "journal.jsonl")
 
 	for i := 1; i <= 4; i++ {
 		if err := appendJSONL(equityPath, EquityRow{Time: "t", Cash: float64(i), Equity: float64(i * 10)}); err != nil {
 			t.Fatalf("append equity row: %v", err)
+		}
+		if err := appendJSONL(pricePath, PriceRow{Time: "t", Symbol: "BTCUSDT", Price: float64(i * 100)}); err != nil {
+			t.Fatalf("append price row: %v", err)
 		}
 		if err := appendJSONL(journalPath, Event{"type": "event", "symbol": i}); err != nil {
 			t.Fatalf("append journal event: %v", err)
@@ -1051,6 +1072,14 @@ func TestJSONLReadersKeepNewestRows(t *testing.T) {
 	}
 	if len(equityRows) != 2 || equityRows[0].Equity != 30 || equityRows[1].Equity != 40 {
 		t.Fatalf("expected newest two equity rows, got %#v", equityRows)
+	}
+
+	priceRows, err := readPriceRows(pricePath, 2)
+	if err != nil {
+		t.Fatalf("readPriceRows returned error: %v", err)
+	}
+	if len(priceRows) != 2 || priceRows[0].Price != 300 || priceRows[1].Price != 400 {
+		t.Fatalf("expected newest two price rows, got %#v", priceRows)
 	}
 
 	journal, err := readJournal(journalPath, 3)
@@ -1066,6 +1095,9 @@ func TestHandleStatusReturnsDashboardData(t *testing.T) {
 	dir := t.TempDir()
 	if err := appendJSONL(filepath.Join(dir, "equity.jsonl"), EquityRow{Time: "now", Cash: 900, Equity: 1100}); err != nil {
 		t.Fatalf("append equity row: %v", err)
+	}
+	if err := appendJSONL(filepath.Join(dir, "price_history.jsonl"), PriceRow{Time: "now", Symbol: "BTCUSDT", Price: 65000}); err != nil {
+		t.Fatalf("append price row: %v", err)
 	}
 	if err := appendJSONL(filepath.Join(dir, "journal.jsonl"), Event{"type": "buy", "symbol": "BTCUSDT"}); err != nil {
 		t.Fatalf("append journal event: %v", err)
@@ -1097,7 +1129,7 @@ func TestHandleStatusReturnsDashboardData(t *testing.T) {
 	if status.DailyReport == nil || status.DailyReport.EndEquity != 1100 {
 		t.Fatalf("unexpected daily report in status response: %#v", status.DailyReport)
 	}
-	if len(status.History) != 1 || len(status.Journal) != 1 || status.CycleCount != 1 {
+	if len(status.History) != 1 || len(status.Prices) != 1 || len(status.Journal) != 1 || status.CycleCount != 1 {
 		t.Fatalf("unexpected history/journal response: %#v", status)
 	}
 	if status.NextInterval != "1m0s" {

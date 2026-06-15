@@ -26,6 +26,7 @@ type StatusResponse struct {
 	Report       *Report      `json:"report"`
 	DailyReport  *DailyReport `json:"daily_report"`
 	History      []EquityRow  `json:"history"`
+	Prices       []PriceRow   `json:"prices"`
 	Journal      []Event      `json:"journal"`
 	LastError    string       `json:"last_error"`
 	Running      bool         `json:"running"`
@@ -39,6 +40,12 @@ type EquityRow struct {
 	Equity      float64 `json:"equity"`
 	RealizedPnL float64 `json:"realized_pnl"`
 	DrawdownPct float64 `json:"drawdown_pct"`
+}
+
+type PriceRow struct {
+	Time   string  `json:"time"`
+	Symbol string  `json:"symbol"`
+	Price  float64 `json:"price"`
 }
 
 func serveDashboard(configPath, addr string, interval time.Duration) error {
@@ -117,10 +124,14 @@ func (app *DashboardApp) handleStatus(w http.ResponseWriter, r *http.Request) {
 	app.mu.RUnlock()
 
 	history, historyErr := readEquityRows(filepath.Join(app.baseDir, "equity.jsonl"), 300)
+	prices, pricesErr := readPriceRows(filepath.Join(app.baseDir, "price_history.jsonl"), 900)
 	journal, journalErr := readJournal(filepath.Join(app.baseDir, "journal.jsonl"), 80)
 	dailyReport, dailyReportErr := readDailyReport(filepath.Join(app.baseDir, "daily_report.json"))
 	if history == nil {
 		history = []EquityRow{}
+	}
+	if prices == nil {
+		prices = []PriceRow{}
 	}
 	if journal == nil {
 		journal = []Event{}
@@ -136,6 +147,8 @@ func (app *DashboardApp) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if lastError == "" {
 		if historyErr != nil && !errors.Is(historyErr, os.ErrNotExist) {
 			lastError = historyErr.Error()
+		} else if pricesErr != nil && !errors.Is(pricesErr, os.ErrNotExist) {
+			lastError = pricesErr.Error()
 		} else if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) {
 			lastError = journalErr.Error()
 		} else if dailyReportErr != nil && !errors.Is(dailyReportErr, os.ErrNotExist) {
@@ -147,6 +160,7 @@ func (app *DashboardApp) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Report:       report,
 		DailyReport:  dailyReport,
 		History:      history,
+		Prices:       prices,
 		Journal:      journal,
 		LastError:    lastError,
 		Running:      running,
@@ -221,6 +235,19 @@ func readEquityRows(path string, limit int) ([]EquityRow, error) {
 	var rows []EquityRow
 	err := readJSONLLimited(path, limit, func(raw []byte) error {
 		var row EquityRow
+		if err := json.Unmarshal(raw, &row); err != nil {
+			return err
+		}
+		rows = append(rows, row)
+		return nil
+	})
+	return rows, err
+}
+
+func readPriceRows(path string, limit int) ([]PriceRow, error) {
+	var rows []PriceRow
+	err := readJSONLLimited(path, limit, func(raw []byte) error {
+		var row PriceRow
 		if err := json.Unmarshal(raw, &row); err != nil {
 			return err
 		}
@@ -441,6 +468,46 @@ const dashboardHTML = `<!doctype html>
       height: 300px;
       display: block;
     }
+    .price-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .price-card {
+      background: linear-gradient(180deg, rgba(23, 31, 42, 0.82), rgba(14, 19, 27, 0.88));
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .price-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .price-symbol {
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: 0.02em;
+    }
+    .price-value {
+      font-size: 16px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .mini-chart {
+      height: 82px;
+      margin-top: 6px;
+    }
+    .price-range {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 11px;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -605,6 +672,7 @@ const dashboardHTML = `<!doctype html>
       .main-stack { grid-column: 1; }
       .side-stack { grid-column: 1; }
       .signal-grid { grid-template-columns: 1fr; }
+      .price-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 560px) {
       main { padding: 12px; }
@@ -642,6 +710,10 @@ const dashboardHTML = `<!doctype html>
         <div class="panel">
           <h2>Capital curve</h2>
           <div class="panel-body"><canvas id="equityChart" height="300"></canvas></div>
+        </div>
+        <div class="panel">
+          <h2>Crypto prices</h2>
+          <div class="panel-body"><div id="priceCharts" class="price-grid"></div></div>
         </div>
         <div class="panel">
           <h2>Signals</h2>
@@ -716,6 +788,7 @@ const dashboardHTML = `<!doctype html>
         renderSignals([], []);
         renderJournal(data.journal || []);
         renderDailyReport(data.daily_report);
+        renderPriceCharts(data.prices || [], []);
         drawChart(document.getElementById("equityChart"), data.history || []);
         return;
       }
@@ -739,6 +812,7 @@ const dashboardHTML = `<!doctype html>
       renderSignals(report.signals || [], events);
       renderJournal(data.journal || []);
       renderDailyReport(data.daily_report);
+      renderPriceCharts(data.prices || [], report.signals || []);
       drawChart(document.getElementById("equityChart"), data.history || []);
     }
 
@@ -812,6 +886,73 @@ const dashboardHTML = `<!doctype html>
       ).join("") || "<tr><td colspan='4'>No closed trades yet</td></tr>";
     }
 
+    function renderPriceCharts(prices, signals) {
+      const el = document.getElementById("priceCharts");
+      const bySymbol = {};
+      for (const row of prices || []) {
+        if (!row.symbol || !row.price) continue;
+        if (!bySymbol[row.symbol]) bySymbol[row.symbol] = [];
+        bySymbol[row.symbol].push(row);
+      }
+      for (const signal of signals || []) {
+        if (!signal.symbol || !signal.price) continue;
+        if (!bySymbol[signal.symbol]) bySymbol[signal.symbol] = [];
+        if (!bySymbol[signal.symbol].length) {
+          bySymbol[signal.symbol].push({ time: signal.time || "", symbol: signal.symbol, price: signal.price });
+        }
+      }
+      const symbols = Object.keys(bySymbol).sort().slice(0, 3);
+      if (!symbols.length) {
+        el.innerHTML = "<div class='sub'>Waiting for price history</div>";
+        return;
+      }
+      el.innerHTML = symbols.map(symbol => {
+        const rows = bySymbol[symbol];
+        const values = rows.map(row => row.price);
+        const last = rows[rows.length - 1];
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const id = "priceChart_" + safeId(symbol);
+        return "<article class='price-card'><div class='price-head'><div><div class='price-symbol'>" + esc(symbol) + "</div><div class='sub'>recent range</div></div><div class='price-value'>" + fmtMoney.format(last.price) + "</div></div><canvas id='" + id + "' class='mini-chart'></canvas><div class='price-range'><span>min " + fmtMoney.format(min) + "</span><span>max " + fmtMoney.format(max) + "</span></div></article>";
+      }).join("");
+      for (const symbol of symbols) {
+        drawMiniChart(document.getElementById("priceChart_" + safeId(symbol)), bySymbol[symbol]);
+      }
+    }
+
+    function drawMiniChart(canvas, rows) {
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const rect = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+      ctx.scale(ratio, ratio);
+      const w = rect.width, h = rect.height, pad = 8;
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = "#273241";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad, h - pad);
+      ctx.lineTo(w - pad, h - pad);
+      ctx.stroke();
+      if (!rows.length) return;
+      const values = rows.map(row => row.price);
+      let min = Math.min(...values), max = Math.max(...values);
+      if (min === max) { min -= Math.max(1, min * 0.001); max += Math.max(1, max * 0.001); }
+      const xFor = i => pad + (i / Math.max(1, rows.length - 1)) * (w - pad * 2);
+      const yFor = v => pad + (1 - (v - min) / (max - min)) * (h - pad * 2);
+      const rising = values[values.length - 1] >= values[0];
+      ctx.strokeStyle = rising ? "#49d18d" : "#ff6b6b";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      rows.forEach((row, i) => {
+        const x = xFor(i), y = yFor(row.price);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
     function drawChart(canvas, history) {
       const ctx = canvas.getContext("2d");
       const rect = canvas.getBoundingClientRect();
@@ -866,6 +1007,9 @@ const dashboardHTML = `<!doctype html>
     }
     function escAttr(value) {
       return esc(value).replace(/\n/g, " ");
+    }
+    function safeId(value) {
+      return String(value).replace(/[^a-zA-Z0-9_-]/g, "_");
     }
 
     loadStatus();
